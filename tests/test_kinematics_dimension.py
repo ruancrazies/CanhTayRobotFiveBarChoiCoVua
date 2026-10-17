@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,9 @@ import pytest
 import yaml
 
 from desktop_app.kinematics.dimension import (
+    PROPOSED_CAPTURE_SLOTS,
+    PROPOSED_PARK_POSITION,
+    PROPOSED_RESERVE_SLOTS,
     BoardExtent,
     BoardGeometry,
     Workspace,
@@ -26,12 +30,11 @@ from desktop_app.kinematics.five_bar import (
 )
 from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
 
-# TEST-ONLY coordinates. They are NOT the robot's capture zone, reserve zone or
-# park position (those are [TO CONFIRM] and unset); they are simply points that
-# are off the board and inside the workspace so the validation code can be exercised.
-TEST_OFF_BOARD_LEFT = (-200.0, 300.0)
-TEST_OFF_BOARD_RIGHT = (200.0, 300.0)
-TEST_OFF_BOARD_NEAR = (0.0, 100.0)
+# TEST-ONLY slots for exercising the validation code with small lists. The robot's
+# PROPOSED layout (still [TO CONFIRM]) is tested separately through Zones.proposed.
+TEST_SLOTS_LEFT = ((-200.0, 300.0), (-200.0, 250.0))
+TEST_SLOTS_RIGHT = ((200.0, 300.0), (200.0, 250.0))
+TEST_PARK = (0.0, 100.0)
 
 
 @pytest.fixture(scope="module")
@@ -187,51 +190,51 @@ def test_workspace_exposes_its_model(workspace: Workspace, model: FiveBarKinemat
 
 
 # --------------------------------------------------------------------------- #
-# Zones: [TO CONFIRM], unset by default
+# Zones: lists of slots, [TO CONFIRM], unset by default
 # --------------------------------------------------------------------------- #
+
+ZONE_NAMES = ("capture_zone", "reserve_zone", "park_position")
 
 
 def test_zones_are_none_until_provided(board: BoardGeometry, workspace: Workspace) -> None:
     zones = Zones(board, workspace)
-    assert zones.undefined == ("capture_zone", "reserve_zone", "park_position")
-    for name in ("capture_zone", "reserve_zone", "park_position"):
+    assert zones.undefined == ZONE_NAMES
+    for name in ZONE_NAMES:
         assert not zones.is_defined(name)
         with pytest.raises(ZoneNotDefinedError, match="TO CONFIRM"):
             getattr(zones, name)
 
 
 def test_undefined_zone_error_names_the_zone(board: BoardGeometry, workspace: Workspace) -> None:
-    zones = Zones(board, workspace, capture_zone=TEST_OFF_BOARD_LEFT)
+    zones = Zones(board, workspace, capture_zone=TEST_SLOTS_LEFT)
     with pytest.raises(ZoneNotDefinedError, match="reserve_zone"):
         zones.reserve_zone
     with pytest.raises(ZoneNotDefinedError, match="park_position"):
         zones.park_position
 
 
-def test_zone_not_defined_is_a_kinematics_error() -> None:
+def test_zone_errors_are_kinematics_errors() -> None:
     assert issubclass(ZoneNotDefinedError, KinematicsError)
     assert issubclass(ZoneValidationError, KinematicsError)
 
 
-def test_provided_zones_are_returned(board: BoardGeometry, workspace: Workspace) -> None:
+def test_provided_slots_are_returned_as_tuples_in_order(board: BoardGeometry, workspace: Workspace) -> None:
     zones = Zones(
-        board,
-        workspace,
-        capture_zone=TEST_OFF_BOARD_LEFT,
-        reserve_zone=TEST_OFF_BOARD_RIGHT,
-        park_position=TEST_OFF_BOARD_NEAR,
+        board, workspace, capture_zone=list(TEST_SLOTS_LEFT), reserve_zone=TEST_SLOTS_RIGHT, park_position=TEST_PARK
     )
-    assert zones.capture_zone == TEST_OFF_BOARD_LEFT
-    assert zones.reserve_zone == TEST_OFF_BOARD_RIGHT
-    assert zones.park_position == TEST_OFF_BOARD_NEAR
+    assert zones.capture_zone == TEST_SLOTS_LEFT and isinstance(zones.capture_zone, tuple)
+    assert zones.reserve_zone == TEST_SLOTS_RIGHT and isinstance(zones.reserve_zone, tuple)
+    assert zones.park_position == TEST_PARK
     assert zones.undefined == ()
-    assert all(zones.is_defined(name) for name in ("capture_zone", "reserve_zone", "park_position"))
+    assert all(zones.is_defined(name) for name in ZONE_NAMES)
 
 
 def test_zones_can_be_provided_one_at_a_time(board: BoardGeometry, workspace: Workspace) -> None:
-    zones = Zones(board, workspace, park_position=TEST_OFF_BOARD_NEAR)
-    assert zones.park_position == TEST_OFF_BOARD_NEAR
+    zones = Zones(board, workspace, park_position=TEST_PARK)
+    assert zones.park_position == TEST_PARK
     assert zones.undefined == ("capture_zone", "reserve_zone")
+    only_reserve = Zones(board, workspace, reserve_zone=TEST_SLOTS_RIGHT)
+    assert only_reserve.undefined == ("capture_zone", "park_position")
 
 
 def test_is_defined_rejects_unknown_names(board: BoardGeometry, workspace: Workspace) -> None:
@@ -239,56 +242,184 @@ def test_is_defined_rejects_unknown_names(board: BoardGeometry, workspace: Works
         Zones(board, workspace).is_defined("bin")
 
 
-@pytest.mark.parametrize("name", ["capture_zone", "reserve_zone", "park_position"])
-def test_zone_on_the_board_is_rejected(board: BoardGeometry, workspace: Workspace, name: str) -> None:
-    for on_board in [(0.0, 300.0), (-108.5, 191.5), (150.0, 300.0), (0.0, 150.0)]:  # last two: on the border
-        with pytest.raises(ZoneValidationError, match="on the board"):
-            Zones(board, workspace, **{name: on_board})
+# ---- the proposed layout (still [TO CONFIRM]) ------------------------------ #
 
 
-@pytest.mark.parametrize("name", ["capture_zone", "reserve_zone", "park_position"])
-def test_zone_outside_the_workspace_is_rejected(board: BoardGeometry, workspace: Workspace, name: str) -> None:
-    with pytest.raises(ZoneValidationError, match="out of reach") as info:
-        Zones(board, workspace, **{name: (0.0, 600.0)})
-    assert isinstance(info.value.__cause__, OutOfReachError)
+def test_proposed_slot_layout_matches_the_owners_proposal() -> None:
+    assert len(PROPOSED_CAPTURE_SLOTS) == 15
+    assert {x for x, _ in PROPOSED_CAPTURE_SLOTS} == {-190.0, -225.0, -260.0}
+    assert {y for _, y in PROPOSED_CAPTURE_SLOTS} == {160.0, 195.0, 230.0, 265.0, 300.0}
+    assert set(PROPOSED_CAPTURE_SLOTS) == {(x, y) for x in (-190.0, -225.0, -260.0) for y in (160.0, 195.0, 230.0, 265.0, 300.0)}
+    assert len(PROPOSED_RESERVE_SLOTS) == 4
+    assert set(PROPOSED_RESERVE_SLOTS) == {(190.0, 200.0), (190.0, 235.0), (225.0, 200.0), (225.0, 235.0)}
+    assert PROPOSED_PARK_POSITION == (0.0, 120.0)
+    assert len(set(PROPOSED_CAPTURE_SLOTS)) == 15 and len(set(PROPOSED_RESERVE_SLOTS)) == 4
 
 
-@pytest.mark.parametrize("name", ["capture_zone", "reserve_zone", "park_position"])
-def test_zone_with_low_margin_is_rejected(
-    board: BoardGeometry, workspace: Workspace, model: FiveBarKinematics, name: str
+def test_proposed_fill_order_is_x_major(board: BoardGeometry) -> None:
+    assert PROPOSED_CAPTURE_SLOTS[:5] == tuple((-190.0, y) for y in (160.0, 195.0, 230.0, 265.0, 300.0))
+    assert PROPOSED_CAPTURE_SLOTS[5] == (-225.0, 160.0)
+    assert PROPOSED_RESERVE_SLOTS == ((190.0, 200.0), (190.0, 235.0), (225.0, 200.0), (225.0, 235.0))
+
+
+def test_proposed_zones_validate_every_slot(
+    board: BoardGeometry, workspace: Workspace, model: FiveBarKinematics, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Off the board and reachable, but with the left arm fully stretched: mu = 0.
-    angle = math.radians(60.0)
-    x = model.motor1_xy[0] + (model.m + model.n) * math.cos(angle)
-    y = (model.m + model.n) * math.sin(angle)
-    assert not board.is_on_board(x, y) and model.is_reachable(x, y)
-    with pytest.raises(ZoneValidationError, match="singularity margin") as info:
-        Zones(board, workspace, **{name: (x, y)})
-    assert isinstance(info.value.__cause__, SingularityError)
+    with caplog.at_level(logging.WARNING, logger="desktop_app.kinematics.dimension"):
+        zones = Zones.proposed(board, workspace)
+    assert zones.capture_zone == PROPOSED_CAPTURE_SLOTS
+    assert zones.reserve_zone == PROPOSED_RESERVE_SLOTS
+    assert zones.park_position == PROPOSED_PARK_POSITION
+    assert zones.undefined == ()
+    # independent re-check of every single slot, against the model, not through Zones
+    for slot in (*zones.capture_zone, *zones.reserve_zone, zones.park_position):
+        assert not board.is_on_board(*slot), slot
+        assert model.is_reachable(*slot), slot
+        assert model.margin_at_point(*slot) >= MIN_SINGULARITY_MARGIN_DEG, slot
+    assert any("PROPOSED" in r.getMessage() and "TO CONFIRM" in r.getMessage() for r in caplog.records)
 
 
-def test_zone_validation_uses_the_workspace_margin(board: BoardGeometry, model: FiveBarKinematics) -> None:
-    point = TEST_OFF_BOARD_NEAR  # mu about 24.4 degrees
-    assert model.margin_at_point(*point) < 25.0
-    Zones(board, Workspace(model, min_margin_deg=15.0), park_position=point)
-    with pytest.raises(ZoneValidationError):
-        Zones(board, Workspace(model, min_margin_deg=25.0), park_position=point)
+def test_proposed_margins(model: FiveBarKinematics) -> None:
+    margins = {slot: model.margin_at_point(*slot) for slot in (*PROPOSED_CAPTURE_SLOTS, *PROPOSED_RESERVE_SLOTS, PROPOSED_PARK_POSITION)}
+    assert min(margins.values()) == pytest.approx(margins[PROPOSED_PARK_POSITION])
+    assert margins[PROPOSED_PARK_POSITION] == pytest.approx(29.4, abs=0.05)
+    assert margins[(-260.0, 300.0)] == pytest.approx(33.3, abs=0.05)  # tightest capture slot
 
 
-@pytest.mark.parametrize("bad", [(1.0,), (1.0, 2.0, 3.0), "ab", (math.nan, 100.0), (0.0, math.inf), ("x", "y"), 5])
-def test_malformed_zone_values_are_rejected(board: BoardGeometry, workspace: Workspace, bad: Any) -> None:
-    with pytest.raises(ZoneValidationError):
-        Zones(board, workspace, capture_zone=bad)
+def test_every_square_can_reach_every_proposed_slot_by_a_straight_line(
+    board: BoardGeometry, workspace: Workspace
+) -> None:
+    from desktop_app.kinematics.trajectory import straight_line
+
+    slots = (*PROPOSED_CAPTURE_SLOTS, *PROPOSED_RESERVE_SLOTS, PROPOSED_PARK_POSITION)
+    for square, center in board.all_square_centers().items():
+        for slot in slots:
+            for start, end in ((center, slot), (slot, center)):
+                assert straight_line(workspace, start, end).min_margin_deg >= MIN_SINGULARITY_MARGIN_DEG, (square, slot)
 
 
-def test_zone_validation_follows_the_board_size(tmp_path: Path, hardware_yaml_data: dict[str, Any], model: FiveBarKinematics) -> None:
-    # A point just left of the default board edge becomes "on the board" for a wider board.
-    point = (-170.0, 300.0)
-    assert Zones(BoardGeometry.from_config(), Workspace(model), capture_zone=point).capture_zone == point
-    hardware_yaml_data["geometry"]["board_border_mm"] = 40.0  # board 328 mm, half 164 ... point still off
-    hardware_yaml_data["geometry"]["square_size_mm"] = 34.0  # board 8 * 34 + 80 = 352, half 176: point on board
+def test_proposed_zones_follow_a_stricter_workspace(board: BoardGeometry, model: FiveBarKinematics) -> None:
+    with pytest.raises(ZoneValidationError):  # the park point has mu about 29.4
+        Zones.proposed(board, Workspace(model, min_margin_deg=35.0))
+
+
+def test_proposed_zones_do_not_fit_a_larger_board(model: FiveBarKinematics, tmp_path: Path, hardware_yaml_data: dict[str, Any]) -> None:
+    hardware_yaml_data["geometry"]["square_size_mm"] = 40.0  # board 8 * 40 + 52 = 372, half 186: slot x = -190 is still off
+    hardware_yaml_data["geometry"]["board_border_mm"] = 40.0  # board 400, half 200: x = -190 is now on the board
     path = tmp_path / "hardware.yaml"
     path.write_text(yaml.safe_dump(hardware_yaml_data), encoding="utf-8")
     wide = BoardGeometry.from_config(load_hardware_config(path))
     with pytest.raises(ZoneValidationError, match="on the board"):
-        Zones(wide, Workspace(model), capture_zone=point)
+        Zones.proposed(wide, Workspace(model))
+
+
+# ---- validation of every slot ----------------------------------------------- #
+
+SLOT_ZONES = ("capture_zone", "reserve_zone")
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+def test_one_bad_slot_among_good_ones_is_rejected_and_named(
+    board: BoardGeometry, workspace: Workspace, name: str
+) -> None:
+    good = [(-200.0, 300.0), (-200.0, 250.0), (-200.0, 200.0)]
+    for bad_index in range(3):
+        slots = list(good)
+        slots[bad_index] = (0.0, 300.0)  # on the board
+        with pytest.raises(ZoneValidationError, match=rf"{name} slot {bad_index}.*on the board"):
+            Zones(board, workspace, **{name: slots})
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+def test_slot_on_the_board_or_its_border_is_rejected(board: BoardGeometry, workspace: Workspace, name: str) -> None:
+    for on_board in [(0.0, 300.0), (-108.5, 191.5), (150.0, 300.0), (0.0, 150.0), (-150.0, 450.0)]:
+        with pytest.raises(ZoneValidationError, match="on the board"):
+            Zones(board, workspace, **{name: [(-200.0, 300.0), on_board]})
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+def test_slot_outside_the_workspace_is_rejected(board: BoardGeometry, workspace: Workspace, name: str) -> None:
+    with pytest.raises(ZoneValidationError, match="out of reach") as info:
+        Zones(board, workspace, **{name: [(-200.0, 300.0), (0.0, 600.0)]})
+    assert isinstance(info.value.__cause__, OutOfReachError)
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+def test_slot_with_low_margin_is_rejected(
+    board: BoardGeometry, workspace: Workspace, model: FiveBarKinematics, name: str
+) -> None:
+    # Off the board and reachable, but with the left arm fully stretched: mu = 0.
+    angle = math.radians(60.0)
+    stretched = (model.motor1_xy[0] + (model.m + model.n) * math.cos(angle), (model.m + model.n) * math.sin(angle))
+    assert not board.is_on_board(*stretched) and model.is_reachable(*stretched)
+    with pytest.raises(ZoneValidationError, match="singularity margin") as info:
+        Zones(board, workspace, **{name: [(-200.0, 300.0), stretched]})
+    assert isinstance(info.value.__cause__, SingularityError)
+
+
+def test_park_position_is_validated_like_a_slot(board: BoardGeometry, workspace: Workspace, model: FiveBarKinematics) -> None:
+    with pytest.raises(ZoneValidationError, match="on the board"):
+        Zones(board, workspace, park_position=(0.0, 300.0))
+    with pytest.raises(ZoneValidationError, match="out of reach"):
+        Zones(board, workspace, park_position=(0.0, 600.0))
+    angle = math.radians(60.0)
+    with pytest.raises(ZoneValidationError, match="singularity margin"):
+        Zones(board, workspace, park_position=(model.motor1_xy[0] + (model.m + model.n) * math.cos(angle), (model.m + model.n) * math.sin(angle)))
+
+
+def test_slot_validation_uses_the_workspace_margin(board: BoardGeometry, model: FiveBarKinematics) -> None:
+    assert model.margin_at_point(*TEST_PARK) < 25.0  # about 24.4
+    Zones(board, Workspace(model, min_margin_deg=15.0), park_position=TEST_PARK)
+    Zones(board, Workspace(model, min_margin_deg=15.0), capture_zone=[TEST_PARK])
+    for kwargs in ({"park_position": TEST_PARK}, {"capture_zone": [TEST_PARK]}, {"reserve_zone": [TEST_PARK]}):
+        with pytest.raises(ZoneValidationError):
+            Zones(board, Workspace(model, min_margin_deg=25.0), **kwargs)
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+def test_empty_slot_list_is_rejected(board: BoardGeometry, workspace: Workspace, name: str) -> None:
+    for empty in ([], ()):
+        with pytest.raises(ZoneValidationError, match="at least one slot"):
+            Zones(board, workspace, **{name: empty})
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+def test_a_single_point_is_no_longer_a_valid_zone(board: BoardGeometry, workspace: Workspace, name: str) -> None:
+    # The previous API took one (x, y). Passing that now must fail loudly, not be misread as two slots.
+    with pytest.raises(ZoneValidationError, match="slot 0 must be an"):
+        Zones(board, workspace, **{name: (-200.0, 300.0)})
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+@pytest.mark.parametrize(
+    "bad", ["ab", 5, [(1.0,)], [(1.0, 2.0, 3.0)], [(math.nan, 100.0)], [(0.0, math.inf)], [("x", "y")], ["ab"], [None]]
+)
+def test_malformed_slots_are_rejected(board: BoardGeometry, workspace: Workspace, name: str, bad: Any) -> None:
+    with pytest.raises(ZoneValidationError):
+        Zones(board, workspace, **{name: bad})
+
+
+@pytest.mark.parametrize("bad", [(1.0,), (1.0, 2.0, 3.0), "ab", (math.nan, 100.0), (0.0, math.inf), ("x", "y"), 5])
+def test_malformed_park_position_is_rejected(board: BoardGeometry, workspace: Workspace, bad: Any) -> None:
+    with pytest.raises(ZoneValidationError):
+        Zones(board, workspace, park_position=bad)
+
+
+@pytest.mark.parametrize("name", SLOT_ZONES)
+def test_repeated_slot_is_rejected(board: BoardGeometry, workspace: Workspace, name: str) -> None:
+    with pytest.raises(ZoneValidationError, match="slot 2.*repeats slot 0"):
+        Zones(board, workspace, **{name: [(-200.0, 300.0), (-200.0, 250.0), (-200.0, 300.0)]})
+
+
+def test_a_point_shared_by_two_zones_is_rejected(board: BoardGeometry, workspace: Workspace) -> None:
+    shared = (-200.0, 300.0)
+    with pytest.raises(ZoneValidationError, match="coincides"):
+        Zones(board, workspace, capture_zone=[shared], reserve_zone=[(-200.0, 250.0), shared])
+    with pytest.raises(ZoneValidationError, match="coincides"):
+        Zones(board, workspace, capture_zone=[shared], park_position=shared)
+
+
+def test_slots_are_normalised_to_floats(board: BoardGeometry, workspace: Workspace) -> None:
+    zones = Zones(board, workspace, capture_zone=[(-200, 300)], park_position=(0, 100))
+    assert zones.capture_zone == ((-200.0, 300.0),)
+    assert all(isinstance(v, float) for v in (*zones.capture_zone[0], *zones.park_position))

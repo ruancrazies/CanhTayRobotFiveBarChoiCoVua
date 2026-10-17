@@ -3,17 +3,19 @@
 Pure NumPy and math, no Qt or serial. Every dimension comes from
 config/hardware.yaml through the existing loader.
 
-The capture zone, the reserve zone and the park position are [TO CONFIRM] in
-the SPEC. They are NOT defined here: :class:`Zones` keeps each of them as
-``None`` until the owner provides coordinates, raises
-:class:`ZoneNotDefinedError` when one is requested too early, and validates a
-provided coordinate (off the board, inside the workspace, mu >= the margin).
+The capture zone, the reserve zone (each a list of slots) and the park position are
+[TO CONFIRM]. :class:`Zones` keeps each of them as ``None`` until coordinates are
+provided, raises :class:`ZoneNotDefinedError` when one is requested too early, and
+validates every provided slot (off the board, inside the workspace, mu >= the margin).
+``Zones.proposed`` builds the owner's PROPOSED layout, which is still [TO CONFIRM].
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
+from typing import Any, Sequence
 
 from desktop_app.kinematics.five_bar import (
     MIN_SINGULARITY_MARGIN_DEG,
@@ -24,6 +26,8 @@ from desktop_app.kinematics.five_bar import (
     SingularityError,
 )
 from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
+
+logger = logging.getLogger(__name__)
 
 _FILES = "abcdefghijklmnopqrstuvwxyz"
 
@@ -156,12 +160,29 @@ class Workspace:
         return True
 
 
-class Zones:
-    """Capture zone, reserve zone and park position (all [TO CONFIRM], ``None`` until provided).
+def _grid(xs: tuple[float, ...], ys: tuple[float, ...]) -> tuple[Point, ...]:
+    """Slots of a rectangular grid, x-major: every y of the first x, then the next x, ..."""
+    return tuple((x, y) for x in xs for y in ys)
 
-    Each is a single (x, y) point in mm in the robot frame. A provided point is
-    validated immediately: it must be off the board (the board border counts as
-    board), inside the workspace and have mu >= the workspace margin.
+
+# PROPOSED slot layout, [TO CONFIRM] on the real board. These are the owner's proposed
+# values (not hardware.yaml constants); ``Zones.proposed`` is the only place that uses
+# them and it logs a warning each time. The tuple order is the suggested fill order.
+PROPOSED_CAPTURE_SLOTS: tuple[Point, ...] = _grid((-190.0, -225.0, -260.0), (160.0, 195.0, 230.0, 265.0, 300.0))
+PROPOSED_RESERVE_SLOTS: tuple[Point, ...] = _grid((190.0, 225.0), (200.0, 235.0))
+PROPOSED_PARK_POSITION: Point = (0.0, 120.0)
+
+
+class Zones:
+    """Capture slots, reserve slots and park position (all [TO CONFIRM], ``None`` until provided).
+
+    * ``capture_zone``: a tuple of slots where captured pieces are dropped.
+    * ``reserve_zone``: a tuple of slots where spare promotion pieces are taken from.
+    * ``park_position``: one (x, y) point outside the camera view.
+
+    Every slot and the park point are validated immediately: off the board (the board
+    border counts as board), inside the workspace, and mu >= the workspace margin.
+    Slots must be distinct, also across zones. Coordinates are mm in the robot frame.
     """
 
     def __init__(
@@ -169,25 +190,45 @@ class Zones:
         board: BoardGeometry,
         workspace: Workspace,
         *,
-        capture_zone: Point | None = None,
-        reserve_zone: Point | None = None,
+        capture_zone: Sequence[Point] | None = None,
+        reserve_zone: Sequence[Point] | None = None,
         park_position: Point | None = None,
     ) -> None:
         self._board = board
         self._workspace = workspace
-        self._points: dict[str, Point | None] = {
-            "capture_zone": self._validate("capture_zone", capture_zone),
-            "reserve_zone": self._validate("reserve_zone", reserve_zone),
-            "park_position": self._validate("park_position", park_position),
-        }
+        capture = self._validate_slots("capture_zone", capture_zone)
+        reserve = self._validate_slots("reserve_zone", reserve_zone)
+        park = self._validate_point("park_position", park_position) if park_position is not None else None
+        self._slots: dict[str, tuple[Point, ...] | None] = {"capture_zone": capture, "reserve_zone": reserve}
+        self._park = park
+        self._check_distinct()
 
-    def _validate(self, name: str, point: Point | None) -> Point | None:
-        if point is None:
-            return None
+    @classmethod
+    def proposed(cls, board: BoardGeometry, workspace: Workspace) -> "Zones":
+        """The proposed layout (15 capture slots, 4 reserve slots, park at (0, 120)), validated.
+
+        These values are [TO CONFIRM] on the real board; a warning is logged on every call.
+        """
+        logger.warning(
+            "using the PROPOSED capture/reserve/park layout, which is [TO CONFIRM] on the real board "
+            "(%d capture slots, %d reserve slots, park %s)",
+            len(PROPOSED_CAPTURE_SLOTS),
+            len(PROPOSED_RESERVE_SLOTS),
+            PROPOSED_PARK_POSITION,
+        )
+        return cls(
+            board,
+            workspace,
+            capture_zone=PROPOSED_CAPTURE_SLOTS,
+            reserve_zone=PROPOSED_RESERVE_SLOTS,
+            park_position=PROPOSED_PARK_POSITION,
+        )
+
+    def _validate_point(self, name: str, point: Any) -> Point:
         try:
-            x, y = (float(point[0]), float(point[1]))
-            if len(point) != 2:
+            if isinstance(point, (str, bytes)) or len(point) != 2:
                 raise ValueError
+            x, y = float(point[0]), float(point[1])
         except (TypeError, ValueError, IndexError):
             raise ZoneValidationError(f"{name} must be an (x, y) pair of numbers, got {point!r}") from None
         if not (math.isfinite(x) and math.isfinite(y)):
@@ -200,36 +241,72 @@ class Zones:
             raise ZoneValidationError(f"{name} ({x:g}, {y:g}) is not usable: {exc}") from exc
         return (x, y)
 
-    def _get(self, name: str) -> Point:
-        point = self._points[name]
-        if point is None:
-            raise ZoneNotDefinedError(
-                f"{name} is [TO CONFIRM] and has not been provided; ask the hardware owner for its (x, y) in mm"
-            )
-        return point
+    def _validate_slots(self, name: str, slots: Sequence[Point] | None) -> tuple[Point, ...] | None:
+        if slots is None:
+            return None
+        if isinstance(slots, (str, bytes)) or not hasattr(slots, "__iter__"):
+            raise ZoneValidationError(f"{name} must be a sequence of (x, y) slots, got {slots!r}")
+        validated: list[Point] = []
+        for index, slot in enumerate(slots):
+            point = self._validate_point(f"{name} slot {index}", slot)
+            if point in validated:
+                raise ZoneValidationError(f"{name} slot {index} {point} repeats slot {validated.index(point)}")
+            validated.append(point)
+        if not validated:
+            raise ZoneValidationError(f"{name} must contain at least one slot")
+        return tuple(validated)
+
+    def _check_distinct(self) -> None:
+        owner: dict[Point, str] = {}
+        everything: list[tuple[str, Point]] = []
+        for name in ("capture_zone", "reserve_zone"):
+            everything.extend((name, p) for p in (self._slots[name] or ()))
+        if self._park is not None:
+            everything.append(("park_position", self._park))
+        for name, point in everything:
+            if point in owner and owner[point] != name:
+                raise ZoneValidationError(f"{name} {point} coincides with a point of {owner[point]}")
+            owner.setdefault(point, name)
+
+    def _undefined(self, name: str) -> ZoneNotDefinedError:
+        return ZoneNotDefinedError(
+            f"{name} is [TO CONFIRM] and has not been provided; ask the hardware owner for its coordinates in mm"
+        )
 
     @property
-    def capture_zone(self) -> Point:
-        """Where captured pieces are dropped. Raises ZoneNotDefinedError until provided."""
-        return self._get("capture_zone")
+    def capture_zone(self) -> tuple[Point, ...]:
+        """Slots where captured pieces are dropped. Raises ZoneNotDefinedError until provided."""
+        slots = self._slots["capture_zone"]
+        if slots is None:
+            raise self._undefined("capture_zone")
+        return slots
 
     @property
-    def reserve_zone(self) -> Point:
-        """Where spare promotion pieces are taken from. Raises ZoneNotDefinedError until provided."""
-        return self._get("reserve_zone")
+    def reserve_zone(self) -> tuple[Point, ...]:
+        """Slots where spare promotion pieces are taken from. Raises ZoneNotDefinedError until provided."""
+        slots = self._slots["reserve_zone"]
+        if slots is None:
+            raise self._undefined("reserve_zone")
+        return slots
 
     @property
     def park_position(self) -> Point:
         """Park position outside the camera view. Raises ZoneNotDefinedError until provided."""
-        return self._get("park_position")
+        if self._park is None:
+            raise self._undefined("park_position")
+        return self._park
 
     def is_defined(self, name: str) -> bool:
         """True when ``name`` ("capture_zone", "reserve_zone" or "park_position") was provided."""
-        if name not in self._points:
-            raise KeyError(name)
-        return self._points[name] is not None
+        if name == "park_position":
+            return self._park is not None
+        if name in self._slots:
+            return self._slots[name] is not None
+        raise KeyError(name)
 
     @property
     def undefined(self) -> tuple[str, ...]:
         """Names of the zones that are still [TO CONFIRM]."""
-        return tuple(name for name, point in self._points.items() if point is None)
+        return tuple(
+            name for name in ("capture_zone", "reserve_zone", "park_position") if not self.is_defined(name)
+        )

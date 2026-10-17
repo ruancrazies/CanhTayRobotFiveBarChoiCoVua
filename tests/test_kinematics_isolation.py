@@ -101,6 +101,16 @@ def test_no_hardware_constant_is_hard_coded(module: Path) -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
     ]
+    # The owner's PROPOSED zone layout is [TO CONFIRM] data, not a hardware.yaml constant:
+    # exactly the assignments named PROPOSED_* are exempt, nothing else.
+    exempt = {
+        child.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id.startswith("PROPOSED_")
+        for child in ast.walk(node)
+        if hasattr(child, "lineno")
+    }
+    literals = [(line, value) for line, value in literals if line not in exempt]
     offending = [(line, value) for line, value in literals if value in HARDWARE_NUMBERS]
     assert offending == [], f"{module.name} hard-codes hardware numbers: {offending}"
 
@@ -109,3 +119,14 @@ def test_the_literal_scan_would_catch_a_hard_coded_constant() -> None:
     tree = ast.parse("L = 100.0\nM = 200\nsteps = 3200 * x")
     found = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value in HARDWARE_NUMBERS]
     assert found == [100.0, 200, 3200]
+
+
+def test_only_the_proposed_zone_layout_is_exempt_from_the_literal_scan() -> None:
+    dimension = (KINEMATICS_DIR / "dimension.py").read_text(encoding="utf-8")
+    tree = ast.parse(dimension)
+    exempt_names = [
+        node.target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id.startswith("PROPOSED_")
+    ]
+    assert exempt_names == ["PROPOSED_CAPTURE_SLOTS", "PROPOSED_RESERVE_SLOTS", "PROPOSED_PARK_POSITION"]
