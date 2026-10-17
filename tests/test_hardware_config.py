@@ -184,15 +184,35 @@ def test_z_axis_and_servo_conventions(cfg: HardwareConfig) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_gear_ratio_is_flagged_as_to_confirm(cfg: HardwareConfig) -> None:
-    assert cfg.to_confirm == ("drive.gear_ratio",)
+def test_gear_ratio_is_confirmed_direct_drive(cfg: HardwareConfig) -> None:
+    assert cfg.drive.gear_ratio == 1.0
+    assert "drive.gear_ratio" not in cfg.to_confirm
 
 
-def test_loading_warns_about_each_to_confirm_value(caplog: pytest.LogCaptureFixture) -> None:
+def test_default_config_has_nothing_left_to_confirm(cfg: HardwareConfig) -> None:
+    assert cfg.to_confirm == ()
+
+
+def test_default_config_loads_without_to_confirm_warnings(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger="desktop_app.utils.hardware_config"):
         load_hardware_config()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_loading_warns_about_each_to_confirm_value(
+    hardware_yaml_data: dict[str, Any], tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The shipped config has nothing to confirm, so the warning path is exercised
+    # with a temporary config that lists entries.
+    hardware_yaml_data["to_confirm"] = ["drive.gear_ratio", "geometry.z_travel_mm"]
+    path = _write(tmp_path, hardware_yaml_data)
+    with caplog.at_level(logging.WARNING, logger="desktop_app.utils.hardware_config"):
+        loaded = load_hardware_config(path)
+    assert loaded.to_confirm == ("drive.gear_ratio", "geometry.z_travel_mm")
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("drive.gear_ratio" in message and "TO CONFIRM" in message for message in warnings)
+    for dotted in ("drive.gear_ratio", "geometry.z_travel_mm"):
+        assert any(dotted in message and "TO CONFIRM" in message for message in warnings), dotted
+    assert len(warnings) == 2
 
 
 def test_to_confirm_entry_must_point_at_a_real_value(hardware_yaml_data: dict[str, Any], tmp_path: Path) -> None:

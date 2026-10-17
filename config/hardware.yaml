@@ -25,7 +25,7 @@ geometry:
 drive:
   full_steps_per_rev: 200         # NEMA 17 style 1.8 degree stepper (the "200" in 200*f*i)
   microstepping: 16               # f: TB6600 microstepping
-  gear_ratio: 1.0                 # i: motor to driving link  [TO CONFIRM], SPEC default 1
+  gear_ratio: 1.0                 # i: motor to driving link; confirmed 1:1 direct drive
 
 pins:                             # ESP32 GPIO numbers (D13 -> 13, ...)
   joint1:                         # TB6600 #1, joint 1 (alpha)
@@ -102,5 +102,4 @@ electrical:
 
 # Dotted paths of values above that are still [TO CONFIRM]. Ask the owner, then
 # remove the entry once the value is confirmed.
-to_confirm:
-  - drive.gear_ratio
+to_confirm: []
