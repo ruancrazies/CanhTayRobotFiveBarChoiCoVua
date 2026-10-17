@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.pio/
+
+# Runtime data
+data/games/*
+!data/games/.gitkeep
+data/models/yolo/*
+!data/models/yolo/.gitkeep
+data/calibration/*
+!data/calibration/.gitkeep
+*.log
