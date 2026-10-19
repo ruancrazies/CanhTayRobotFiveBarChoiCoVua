@@ -1,0 +1,40 @@
+{
+  "description": "Stockfish configuration and the five difficulty modes (docs/SPEC.md section 9). Internal keys are English; the Vietnamese display names live only in desktop_app/gui/strings_vi.py. Mode values are starting points to be tuned with real players.",
+  "engine": {
+    "path": "stockfish",
+    "answer_margin_s": 5.0,
+    "max_restarts": 1
+  },
+  "default_options": {
+    "UCI_LimitStrength": false,
+    "Skill Level": 20
+  },
+  "default_mode": "amateur",
+  "modes": {
+    "beginner": {
+      "options": {"Skill Level": 0},
+      "think_time_s": 0.2,
+      "max_depth": 2
+    },
+    "amateur": {
+      "options": {"UCI_LimitStrength": true, "UCI_Elo": 1400},
+      "think_time_s": 0.5,
+      "max_depth": null
+    },
+    "player": {
+      "options": {"UCI_LimitStrength": true, "UCI_Elo": 1800},
+      "think_time_s": 1.0,
+      "max_depth": null
+    },
+    "master": {
+      "options": {"UCI_LimitStrength": true, "UCI_Elo": 2400},
+      "think_time_s": 2.0,
+      "max_depth": null
+    },
+    "grandmaster": {
+      "options": {},
+      "think_time_s": 3.0,
+      "max_depth": null
+    }
+  }
+}

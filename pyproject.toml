@@ -2,3 +2,6 @@
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra"
+markers = [
+    "integration: needs an external binary (for example Stockfish); skipped when it is missing",
+]
