@@ -24,6 +24,10 @@ Assumptions the SPEC does not spell out (flagged in the phase 2 report):
   * the pawn that is promoted goes to the next free capture slot ("off the board");
   * the reserve zone holds spare pieces of the robot's own colour, one per slot, and the piece
     type of each slot is given to the planner (``reserve_pieces``);
+  * grasp angles and reserve slot contents stay PLACEHOLDERS until phase 5. They are fail-safe:
+    a value is real only when it says so (``GraspProfiles.from_file`` or
+    ``ReserveSlot(is_placeholder=False)``). ``MovePlanner.placeholders()`` lists what is still a
+    placeholder, so the phase 3 Robot Commander can refuse a real serial port while any is left;
   * the arm starts every chain at the park position and ``MoveChain.park_leg`` is the validated
     return trip from the last drop point to the park position (VERIFY sends it).
 """
@@ -91,9 +95,13 @@ class GraspProfiles:
 
     open_deg: float
     close_deg: Mapping[chess.PieceType, float]
+    # Fail-safe: a profile is real only when it was loaded from config/grasp_profiles.json
+    # (``from_file``). Anything else (demo values, test values, a hand-built object) is a
+    # placeholder until phase 5, and the phase 3 Robot Commander must not drive a real port with it.
+    is_placeholder: bool = True
 
     @classmethod
-    def from_dict(cls, data: object) -> "GraspProfiles":
+    def from_dict(cls, data: object, *, placeholder: bool = True) -> "GraspProfiles":
         if not isinstance(data, dict) or set(data) != {"open_deg", "close_deg"}:
             raise GraspProfilesError('grasp profiles must be an object with exactly "open_deg" and "close_deg"')
 
@@ -109,6 +117,7 @@ class GraspProfiles:
         return cls(
             open_deg=angle("open_deg", data["open_deg"]),
             close_deg={symbols[key]: angle(f"close_deg.{key}", value) for key, value in raw.items()},
+            is_placeholder=placeholder,
         )
 
     @classmethod
@@ -120,7 +129,7 @@ class GraspProfiles:
                 "ask the hardware owner and create the file"
             )
         try:
-            return cls.from_dict(json.loads(source.read_text(encoding="utf-8")))
+            return cls.from_dict(json.loads(source.read_text(encoding="utf-8")), placeholder=False)
         except (OSError, ValueError) as exc:
             if isinstance(exc, GraspProfilesError):
                 raise
@@ -128,6 +137,23 @@ class GraspProfiles:
 
     def close_angle(self, piece_type: chess.PieceType) -> float:
         return self.close_deg[piece_type]
+
+
+# --------------------------------------------------------------------------- #
+# Reserve slot contents
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ReserveSlot:
+    """The spare piece in one reserve slot, and whether that content is still a placeholder.
+
+    Fail-safe default: the content is a placeholder unless the caller says it was confirmed
+    (``is_placeholder=False``, once the real content comes from config in phase 5).
+    """
+
+    piece_type: chess.PieceType
+    is_placeholder: bool = True
 
 
 # --------------------------------------------------------------------------- #
@@ -321,8 +347,9 @@ class MovePlanner:
         geometry: board geometry (square centres).
         zones: capture slots, reserve slots and park position ([TO CONFIRM] until provided).
         grasp: gripper angles ([TO CONFIRM] until provided).
-        reserve_pieces: piece type of the spare piece in each reserve slot, in the order of
-            ``zones.reserve_zone``. Required when the reserve zone is defined.
+        reserve_pieces: the spare piece in each reserve slot, in the order of ``zones.reserve_zone``.
+            Required when the reserve zone is defined. Each item is a :class:`ReserveSlot`, or a
+            bare piece type, which counts as a PLACEHOLDER slot.
         ds: maximum straight-line segment length in mm.
     """
 
@@ -333,7 +360,7 @@ class MovePlanner:
         zones: Zones,
         grasp: GraspProfiles,
         *,
-        reserve_pieces: Optional[Sequence[chess.PieceType]] = None,
+        reserve_pieces: Optional[Sequence[Union[chess.PieceType, ReserveSlot]]] = None,
         ds: float = DEFAULT_MAX_SEGMENT_MM,
     ) -> None:
         self._workspace = workspace
@@ -341,7 +368,10 @@ class MovePlanner:
         self._zones = zones
         self._grasp = grasp
         self._ds = ds
-        self._reserve_pieces: tuple[chess.PieceType, ...] = tuple(reserve_pieces) if reserve_pieces is not None else ()
+        self._reserve_slots: tuple[ReserveSlot, ...] = tuple(
+            item if isinstance(item, ReserveSlot) else ReserveSlot(item) for item in (reserve_pieces or ())
+        )
+        self._reserve_pieces: tuple[chess.PieceType, ...] = tuple(slot.piece_type for slot in self._reserve_slots)
         if zones.is_defined("reserve_zone"):
             slots = len(zones.reserve_zone)
             if len(self._reserve_pieces) != slots:
@@ -356,6 +386,28 @@ class MovePlanner:
     @property
     def reserve_pieces(self) -> tuple[chess.PieceType, ...]:
         return self._reserve_pieces
+
+    @property
+    def reserve_slots(self) -> tuple[ReserveSlot, ...]:
+        return self._reserve_slots
+
+    @property
+    def grasp(self) -> GraspProfiles:
+        return self._grasp
+
+    def placeholders(self) -> tuple[str, ...]:
+        """Everything that is still a placeholder: ``"grasp_profiles"`` and ``"reserve_slot[i]"``.
+
+        Empty only when every grasp angle and every reserve slot content is confirmed. The phase 3
+        Robot Commander refuses a real serial port while this is not empty (SPEC 7.2).
+        """
+        found: list[str] = ["grasp_profiles"] if self._grasp.is_placeholder else []
+        found += [f"reserve_slot[{i}]" for i, slot in enumerate(self._reserve_slots) if slot.is_placeholder]
+        return tuple(found)
+
+    @property
+    def has_placeholders(self) -> bool:
+        return bool(self.placeholders())
 
     def plan(self, board: chess.Board, move: chess.Move, inventory: Optional[ZoneInventory] = None) -> MoveChain:
         """Plan ``move`` (played from ``board``). ``board`` and ``inventory`` are not modified.

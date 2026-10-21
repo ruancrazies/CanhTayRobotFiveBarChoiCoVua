@@ -223,15 +223,24 @@ Wraps `chess.Board`; the only place allowed to change the position.
 | SETUP\_CHECK | Camera confirms the required position; user picks side and mode, presses Start | WAIT\_HUMAN, ENGINE\_THINK, or PLAN (redo pending\_move) |
 | WAIT\_HUMAN | Enable Move Detector; wait for a stable legal move (or manual confirm) | COMMIT\_HUMAN |
 | COMMIT\_HUMAN | `commit_move(human)`; check game end | ENGINE\_THINK or GAME\_OVER |
-| ENGINE\_THINK | Ask Stockfish, store `pending_move` (not committed) | PLAN |
-| PLAN | Move Planner builds the command chain (capture, castling, promotion...) | ROBOT\_EXEC |
+| ENGINE\_THINK | Ask Stockfish, store `pending_move` (not committed) | PLAN, or ERROR\_RECOVER if the engine fails or times out |
+| PLAN | Move Planner builds the command chain (capture, castling, promotion...) | ROBOT\_EXEC, or ERROR\_RECOVER if a point is invalid or no capture or reserve slot is free |
 | ROBOT\_EXEC | Send commands, wait for ok and done; Move Detector locked | VERIFY or ERROR\_RECOVER |
 | VERIFY | Robot to park position, capture image, YOLO compares piece types per square with the expected position; match → `commit_move(engine)`, update CorrectionMap | WAIT\_HUMAN, GAME\_OVER or ERROR\_RECOVER |
-| PAUSED | Keep GameState, Move Detector locked, robot at park position | Previous state |
-| ERROR\_RECOVER | Report error, highlight suspect squares, wait for Resync. After ESTOP, lost steps, HB\_TIMEOUT or SENSOR\_FAULT, homing is mandatory; keep pending\_move | WAIT\_HUMAN, PLAN or HOMING |
+| PAUSED | Keep GameState, Move Detector locked, robot at park position | The step that would have followed |
+| ERROR\_RECOVER | Entered from any running state on ESTOP, HB\_TIMEOUT, SENSOR\_FAULT, camera loss or a planning failure. Report error, highlight suspect squares, wait for Resync. After ESTOP, lost steps, HB\_TIMEOUT or SENSOR\_FAULT, homing is mandatory; keep pending\_move | WAIT\_HUMAN, PLAN, HOMING or GAME\_OVER |
 | GAME\_OVER | Show result, save PGN | INIT or SETUP\_CHECK |
 
-The robot moves only in ENGINE\_THINK, PLAN and ROBOT\_EXEC; in those phases the camera is locked out of move detection.
+The arm moves only in HOMING, ROBOT\_EXEC and VERIFY (return to the park position); ENGINE\_THINK and PLAN only compute. Move detection is locked in every state except WAIT\_HUMAN.
+
+Rules clarified in phase 2:
+
+- PAUSED resumes at the step that would have followed, not literally the previous state.
+- CALIBRATE and HOMING are two separate states.
+- A promoted pawn goes to the next free capture slot.
+- A draw by threefold repetition or the 50-move rule ends the game only once it has actually occurred.
+- The engine answer timeout is 5 s and the default mode is amateur.
+- The Robot Commander refuses to use a real serial port while any grasp profile or reserve slot is still a placeholder.
 
 ### 7.3 Pause and YOLO on/off rules
 

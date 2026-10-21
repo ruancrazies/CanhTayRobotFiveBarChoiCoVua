@@ -13,8 +13,12 @@ The capture/reserve/park layout comes from ``Zones.proposed`` (the owner's propo
 [TO CONFIRM]). The gripper angles and the content of each reserve slot are also [TO CONFIRM]
 and are NOT in config yet, so ``--demo-placeholders`` substitutes clearly marked placeholders.
 
-Commands while it is your turn: a move, ``moves``, ``pause`` (then ``resume``), ``quit``.
+Commands while it is your turn: a move, ``moves``, ``pause`` (then ``resume``), ``alarm <CODE>``
+(simulates ESTOP, HB_TIMEOUT, SENSOR_FAULT, CAMERA_LOST, ...), ``quit``.
 Everything is driven through the FSM: the runner does the work of a state and reports the result.
+An engine failure, a planning failure, a robot or VERIFY failure or an alarm leads to ERROR_RECOVER,
+where you fix the cause and type ``resync`` (``fixed``, ``emptied`` and ``quit`` also work there).
+The stub robot may only move in HOMING, ROBOT_EXEC and VERIFY (SPEC 7.2).
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from typing import Callable, Optional, Protocol, Sequence, TextIO
 import chess
 
 from desktop_app.core.engine import Engine, EngineError, load_engine_config
-from desktop_app.core.fsm import Fsm, State, Trigger
+from desktop_app.core.fsm import ALARM_CODES, Fsm, State, Trigger
 from desktop_app.core.game_state import DEFAULT_GAMES_DIR, GameState, MoveSource
 from desktop_app.core.move_planner import (
     DEFAULT_GRASP_PROFILES_PATH,
@@ -40,6 +44,7 @@ from desktop_app.core.move_planner import (
     MovePlanError,
     MovePlanner,
     MoveStep,
+    ReserveSlot,
     ZDownStep,
     ZoneInventory,
     ZUpStep,
@@ -73,6 +78,10 @@ class StubRobotError(RuntimeError):
     """The chain asked the robot to do something physically impossible."""
 
 
+class ArmLockedError(RuntimeError):
+    """The arm was asked to move in a state where it must not (SPEC 7.2). A bug, never a normal failure."""
+
+
 class PhysicalWorld:
     """What is physically where: board squares ("e4"), capture slots and reserve slots by name."""
 
@@ -95,17 +104,32 @@ class PhysicalWorld:
 class StubRobot:
     """Executes a MoveChain on the PhysicalWorld, refusing anything physically impossible."""
 
-    def __init__(self, world: PhysicalWorld) -> None:
+    def __init__(self, world: PhysicalWorld, may_move: Optional[Callable[[], bool]] = None) -> None:
+        """``may_move`` says whether the arm is allowed to move now (the FSM's ``arm_may_move``)."""
         self._world = world
+        self._may_move = may_move
         self._z_top = True
         self._holding: Optional[chess.Piece] = None
         self._at = "park"
 
+    def _check_allowed(self, what: str) -> None:
+        if self._may_move is not None and not self._may_move():
+            raise ArmLockedError(f"the arm may not move now ({what}): only HOMING, ROBOT_EXEC and VERIFY move it")
+
+    def home(self) -> None:
+        """Homing: Z to TOP, arm to the park position. A piece left in the gripper is dropped by hand."""
+        self._check_allowed("home")
+        self._z_top = True
+        self._holding = None
+        self._at = "park"
+
     def execute(self, chain: MoveChain) -> None:
+        self._check_allowed("execute")
         for step in chain.steps:
             self._do(step)
 
     def park(self, chain: MoveChain) -> None:
+        self._check_allowed("park")
         self._do(chain.park_leg)
 
     def _do(self, step: object) -> None:
@@ -186,9 +210,18 @@ class ConsoleGame:
         out: TextIO,
         inventory: Optional[ZoneInventory] = None,
         initial_world: Optional[PhysicalWorld] = None,
+        alarm_source: Optional[Callable[[State], Optional[str]]] = None,
     ) -> None:
-        """``initial_world`` is what the stub camera sees at start (default: the GameState position)."""
+        """``initial_world`` is what the stub camera sees at start (default: the GameState position).
+
+        ``alarm_source`` stands in for the ESP32 and camera threads: it is asked once per state the
+        loop enters and may return an alarm code (for example ``"ESTOP"``) to raise in that state.
+        """
         self._initial_world = initial_world
+        self._alarm_source = alarm_source
+        self._human_color: chess.Color = chess.WHITE
+        self._error = ""
+        self._pending_chain: Optional[MoveChain] = None
         self.game = game
         self.engine = engine
         self.planner = planner
@@ -199,6 +232,7 @@ class ConsoleGame:
         self.world: Optional[PhysicalWorld] = None
         self.robot: Optional[StubRobot] = None
         self.chains: list[MoveChain] = []
+        self.states_visited: list[State] = []
 
     # ------------------------------------------------------------------ #
 
@@ -221,25 +255,27 @@ class ConsoleGame:
                 for i, piece_type in enumerate(self.planner.reserve_pieces)
             }
             self.world = PhysicalWorld(self.game.board, reserve)
-        self.robot = StubRobot(self.world)
+        self.robot = StubRobot(self.world, may_move=lambda: self.fsm.arm_may_move)
 
     def run(self, human_color: chess.Color) -> RunResult:
         fsm, game = self.fsm, self.game
+        self._human_color = human_color
         fsm.attach_game_state(game)
         for trigger in (Trigger.YOLO_ON, Trigger.INIT_DONE, Trigger.CALIBRATE_DONE):  # stubbed: nothing to connect
             fsm.handle(trigger)
         self._build_world(human_color)
 
-        pending_choice = self._resolve_pending_on_start()
-        if pending_choice is None:
-            return RunResult(1, fsm.state, "the saved pending move cannot be resolved automatically; resync by hand")
-        started = fsm.handle(Trigger.START, human_color=human_color, **pending_choice)
-        if not started.accepted:
-            return RunResult(1, fsm.state, started.reason)
-
         while True:
             state = fsm.state
-            if state is State.WAIT_HUMAN:
+            self.states_visited.append(state)
+            if self._inject_alarm(state):
+                continue
+            result: Optional[RunResult]
+            if state is State.SETUP_CHECK:
+                result = self._setup_check()
+            elif state is State.HOMING:
+                result = self._homing()
+            elif state is State.WAIT_HUMAN:
                 result = self._wait_human()
             elif state is State.ENGINE_THINK:
                 result = self._engine_think()
@@ -251,11 +287,13 @@ class ConsoleGame:
                 result = self._verify()
             elif state is State.PAUSED:
                 result = self._paused()
+            elif state is State.ERROR_RECOVER:
+                result = self._error_recover()
             elif state is State.GAME_OVER:
                 return self._game_over()
             elif state is State.IDLE:
                 return RunResult(0, state, "stopped")
-            else:  # ERROR_RECOVER, HOMING, ...: the stubs never get here unless something is wrong
+            else:  # INIT / CALIBRATE are stubbed away above, so this is a bug
                 return RunResult(1, state, f"stopped in {state.value}")
             if result is not None:
                 return result
@@ -264,8 +302,85 @@ class ConsoleGame:
     # Work of each state; each returns a RunResult only when the run must end
     # ------------------------------------------------------------------ #
 
-    def _resolve_pending_on_start(self) -> Optional[dict[str, str]]:
-        """SETUP_CHECK: compare the camera with the position before/after a recovered pending move."""
+    def _raise_alarm(self, code: str, text: str) -> bool:
+        """Report an alarm to the FSM; True when it was accepted (the FSM decides)."""
+        result = self.fsm.handle(Trigger.ALARM, alarm=code)
+        if result.accepted:
+            self._error = text
+            self._say(f"ALARM {code}: {text}")
+        else:
+            self._say(f"The FSM refused the alarm: {result.reason}")
+        return result.accepted
+
+    def _inject_alarm(self, state: State) -> bool:
+        if self._alarm_source is None:
+            return False
+        code = self._alarm_source(state)
+        return code is not None and self._raise_alarm(code, f"simulated alarm in {state.value}")
+
+    def _fail(self, trigger: Trigger, text: str) -> None:
+        """Report a failure of the work of a state: the FSM moves to ERROR_RECOVER."""
+        self._error = text
+        self.fsm.handle(trigger, **({"reason": text} if trigger in (Trigger.ENGINE_FAILED, Trigger.PLAN_FAILED) else {}))
+
+    def _setup_check(self) -> Optional[RunResult]:
+        """SETUP_CHECK: compare the camera with a recovered pending move, then press Start."""
+        pending_choice = self._resolve_pending()
+        if pending_choice is None:
+            return RunResult(1, self.fsm.state, "the saved pending move cannot be resolved automatically; resync by hand")
+        started = self.fsm.handle(Trigger.START, human_color=self._human_color, **pending_choice)
+        if not started.accepted:
+            return RunResult(1, self.fsm.state, started.reason)
+        return None
+
+    def _homing(self) -> Optional[RunResult]:
+        assert self.robot is not None
+        self._say("Homing (stub): Z up, then both joints.")
+        self.robot.home()
+        self.fsm.handle(Trigger.HOMING_DONE)
+        return None
+
+    def _error_recover(self) -> Optional[RunResult]:
+        game = self.game
+        self._say(f"ERROR_RECOVER: {self._error or 'unknown error'}")
+        if game.pending_move is not None:
+            self._say(f"The pending move {game.pending_move.uci()} is kept.")
+        if self.fsm.homing_required:
+            self._say("Homing is mandatory before the game goes on.")
+        raw = self._ask(
+            "Fix the cause, then type 'resync' ('fixed' = pieces put back to the position before the move, "
+            "'emptied' = capture zone emptied, 'quit'): "
+        )
+        if raw is None or raw.lower() in ("quit", "exit"):
+            self.fsm.handle(Trigger.YOLO_OFF)
+        elif raw.lower() == "emptied":
+            self._empty_capture_zone()
+        elif raw.lower() == "fixed":
+            assert self.world is not None
+            self.world.sync_squares(game.board)  # the operator put every piece back by hand
+            self.robot = StubRobot(self.world, may_move=lambda: self.fsm.arm_may_move)
+        elif raw.lower() in ("resync", ""):
+            if game.pending_move is not None and not self.fsm.homing_required:
+                # Like SETUP_CHECK: the board may already show the finished move (for example the camera
+                # was lost during VERIFY). Commit it instead of redoing it; refuse while a piece is half-way.
+                if self._resolve_pending() is None:
+                    self._say("A piece is half-way: put the pieces back ('fixed') or finish the move, then resync.")
+                    return None
+            result = self.fsm.handle(Trigger.RESYNC)
+            if not result.accepted:
+                self._say(f"Cannot resync: {result.reason}")
+        else:
+            self._say(f"Unknown command '{raw}'.")
+        return None
+
+    def _empty_capture_zone(self) -> None:
+        self.inventory = ZoneInventory(capture_used=0, reserve_used=self.inventory.reserve_used)
+        if self.world is not None:  # the operator physically took the pieces out of the zone
+            for name in [n for n in self.world.pieces if n.startswith("capture_slot")]:
+                del self.world.pieces[name]
+
+    def _resolve_pending(self) -> Optional[dict[str, str]]:
+        """Compare the camera with the position before/after a pending move (SETUP_CHECK and resync)."""
         game = self.game
         move = game.pending_move
         if move is None:
@@ -277,6 +392,10 @@ class ConsoleGame:
             return {"pending": "redo"}
         if outcome == "after":
             game.commit_move(move, MoveSource.ENGINE)
+            chain = self._pending_chain
+            if chain is not None and chain.move_uci == move.uci():
+                self.inventory = self.inventory.consume(chain)
+            self._pending_chain = None
             self._say("The move had been fully made; it is committed now.")
             return {}
         return None
@@ -296,6 +415,13 @@ class ConsoleGame:
             return None
         if raw.lower() == "pause":
             fsm.handle(Trigger.PAUSE)
+            return None
+        if raw.lower().startswith("alarm "):
+            code = raw.split(None, 1)[1].upper()
+            if code not in ALARM_CODES:
+                self._say(f"Unknown alarm '{code}'. Known: {', '.join(sorted(ALARM_CODES))}.")
+            else:
+                self._raise_alarm(code, "simulated alarm typed by the operator")
             return None
         move = self._parse(raw)
         if move is None:
@@ -335,9 +461,7 @@ class ConsoleGame:
             move = self.engine.best_move(game.fen())  # always the FEN from GameState
         except EngineError as exc:
             self._say(f"Engine error: {exc}")
-            raw = self._ask("Press Enter to retry or type 'quit': ")
-            if raw is None or raw.lower() in ("quit", "exit"):
-                fsm.handle(Trigger.YOLO_OFF)
+            self._fail(Trigger.ENGINE_FAILED, f"engine error: {exc}")
             return None
         game.set_pending_move(move)
         fsm.handle(Trigger.ENGINE_MOVE_READY)
@@ -351,14 +475,7 @@ class ConsoleGame:
             chain = self.planner.plan(game.board, move, self.inventory)
         except MovePlanError as exc:
             self._say(f"Cannot plan {move.uci()}: {exc}")
-            raw = self._ask("Fix it, then press Enter to retry ('emptied' = capture zone emptied, 'quit'): ")
-            if raw is None or raw.lower() in ("quit", "exit"):
-                fsm.handle(Trigger.YOLO_OFF)
-            elif raw.lower() == "emptied":
-                self.inventory = ZoneInventory(capture_used=0, reserve_used=self.inventory.reserve_used)
-                if self.world is not None:  # the operator physically took the pieces out of the zone
-                    for name in [n for n in self.world.pieces if n.startswith("capture_slot")]:
-                        del self.world.pieces[name]
+            self._fail(Trigger.PLAN_FAILED, f"cannot plan {move.uci()}: {exc}")
             return None
         self.chains.append(chain)
         for line in chain.describe():
@@ -368,19 +485,19 @@ class ConsoleGame:
         return None
 
     def _robot_exec(self) -> Optional[RunResult]:
-        assert self.robot is not None
+        assert self.robot is not None and self._pending_chain is not None
         try:
             self.robot.execute(self._pending_chain)
         except StubRobotError as exc:
             self._say(f"Robot stub error: {exc}")
-            self.fsm.handle(Trigger.EXEC_FAILED)
+            self._fail(Trigger.EXEC_FAILED, f"robot stub error: {exc}")
             return None
         self.fsm.handle(Trigger.EXEC_DONE)
         return None
 
     def _verify(self) -> Optional[RunResult]:
         game, fsm = self.game, self.fsm
-        assert self.robot is not None and self.world is not None
+        assert self.robot is not None and self.world is not None and self._pending_chain is not None
         move = game.pending_move
         assert move is not None
         self.robot.park(self._pending_chain)
@@ -388,10 +505,11 @@ class ConsoleGame:
         wrong = suspect_squares(expected, self.world.squares())
         if wrong:
             self._say(f"VERIFY failed, suspect squares: {', '.join(wrong)}")
-            fsm.handle(Trigger.VERIFY_FAILED)
+            self._fail(Trigger.VERIFY_FAILED, f"VERIFY failed, suspect squares: {', '.join(wrong)}")
             return None
         record = game.commit_move(move, MoveSource.ENGINE)
         self.inventory = self.inventory.consume(self._pending_chain)
+        self._pending_chain = None
         self._say(f"Engine plays {record.san}.")
         fsm.handle(Trigger.VERIFY_OK)
         return None
@@ -405,8 +523,6 @@ class ConsoleGame:
         if self.game.data_dir is not None:
             self._say(f"PGN saved in {self.game.data_dir / 'current.pgn'}")
         return RunResult(0, State.GAME_OVER, f"{outcome.result} {outcome.termination}")
-
-    _pending_chain: MoveChain
 
 
 # --------------------------------------------------------------------------- #
@@ -433,7 +549,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if DEFAULT_GRASP_PROFILES_PATH.exists():
         grasp = GraspProfiles.from_file()
     elif args.demo_placeholders:
-        grasp = GraspProfiles.from_dict(PLACEHOLDER_GRASP)
+        grasp = GraspProfiles.from_dict(PLACEHOLDER_GRASP, placeholder=True)
     else:
         out.write(
             "config/grasp_profiles.json does not exist and the gripper angles are [TO CONFIRM].\n"
@@ -457,7 +573,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     workspace = Workspace(FiveBarKinematics.from_config(hardware))
     geometry = BoardGeometry.from_config(hardware)
     zones = Zones.proposed(geometry, workspace)
-    planner = MovePlanner(workspace, geometry, zones, grasp, reserve_pieces=PLACEHOLDER_RESERVE_PIECES)
+    reserve = tuple(ReserveSlot(piece_type, is_placeholder=True) for piece_type in PLACEHOLDER_RESERVE_PIECES)
+    planner = MovePlanner(workspace, geometry, zones, grasp, reserve_pieces=reserve)
+    out.write(f"Still placeholders (a real serial port would be refused): {', '.join(planner.placeholders())}.\n")
 
     game = None if args.new else GameState.load(args.data_dir)
     if game is None:

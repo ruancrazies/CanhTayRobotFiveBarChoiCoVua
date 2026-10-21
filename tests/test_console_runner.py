@@ -163,10 +163,11 @@ def test_engine_promotion_with_capture(tmp_path: Path) -> None:
 def test_a_full_capture_zone_stops_the_robot_until_the_operator_empties_it(tmp_path: Path) -> None:
     fen = "4k3/8/8/2p5/3P4/8/4P3/4K3 b - - 0 1"
     runner, result, output, prompts = play(
-        tmp_path, ["e3", "emptied", "quit"], ["c5d4", "d4e3"], fen=fen, planner=make_planner(capture_slots=1)
+        tmp_path, ["e3", "emptied", "resync", "quit"], ["c5d4", "d4e3"], fen=fen, planner=make_planner(capture_slots=1)
     )
     assert "the capture zone is full" in output
     assert any("emptied" in p for p in prompts)
+    assert State.ERROR_RECOVER in runner.states_visited  # a planning failure is an error, not a retry loop
     assert runner.game.history[-1].san == "dxe3" and result.exit_code == 0
     assert runner.chains[-1].capture_slots_used == (0,)  # the zone was emptied, so slot 0 is free again
 
@@ -179,6 +180,7 @@ def test_a_planning_error_leaves_game_state_and_fsm_untouched(tmp_path: Path) ->
     # the second capture could not be planned: the move stays pending, nothing was committed
     assert [r.san for r in runner.game.history] == ["cxd4", "e3"]
     assert runner.game.pending_move == UCI("d4e3")
+    assert State.ERROR_RECOVER in runner.states_visited
     assert result.final_state is State.IDLE and (tmp_path / "pending.json").exists()
 
 
@@ -192,8 +194,14 @@ def test_an_engine_error_is_reported_and_can_be_retried(tmp_path: Path) -> None:
                 raise EngineUnavailableError("no answer")
             return super().best_move(fen)
 
-    runner, result, output, _ = play(tmp_path, ["e4", "", "quit"], [], engine=Flaky(["e7e5"]))
+    # engine fails -> ERROR_RECOVER -> resync -> HOMING -> SETUP_CHECK -> Start asks the engine again
+    runner, result, output, _ = play(tmp_path, ["e4", "resync", "quit"], [], engine=Flaky(["e7e5"]))
     assert "Engine error: no answer" in output
+    assert runner.states_visited == [
+        State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.ERROR_RECOVER, State.HOMING,
+        State.SETUP_CHECK, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC, State.VERIFY,
+        State.WAIT_HUMAN, State.IDLE,
+    ]
     assert [r.san for r in runner.game.history] == ["e4", "e5"]
 
 
@@ -204,12 +212,13 @@ def test_the_operator_can_quit_when_the_engine_is_down(tmp_path: Path) -> None:
 
     runner, result, _, _ = play(tmp_path, ["e4", "quit"], [], engine=Dead())
     assert result.final_state is State.IDLE and [r.san for r in runner.game.history] == ["e4"]
+    assert State.ERROR_RECOVER in runner.states_visited
 
 
 def test_a_chain_that_cannot_be_executed_ends_in_error_recover_and_keeps_the_pending_move(tmp_path: Path) -> None:
     """The pawn on e7 is gone when the robot reaches for it, so the stub robot cannot grip it."""
     game = GameState.new_game(tmp_path)
-    inputs = iter(["e4"])
+    inputs = iter(["e4", "quit"])
     out = io.StringIO()
     runner = ConsoleGame(game=game, engine=ScriptedEngine(["e7e5"]), planner=make_planner(), fsm=Fsm(),
                          input_fn=lambda _p: next(inputs), out=out)
@@ -222,14 +231,14 @@ def test_a_chain_that_cannot_be_executed_ends_in_error_recover_and_keeps_the_pen
 
     runner._robot_exec = pawn_disappears  # type: ignore[method-assign]
     result = runner.run(chess.WHITE)
-    assert result.exit_code == 1 and result.final_state is State.ERROR_RECOVER
+    assert State.ERROR_RECOVER in runner.states_visited and result.final_state is State.IDLE  # the operator quit
     assert "Robot stub error" in out.getvalue() and "nothing to grip at e7" in out.getvalue()
     assert game.pending_move == UCI("e7e5") and len(game.history) == 1  # kept; nothing committed
 
 
 def test_a_verify_mismatch_is_reported_with_suspect_squares(tmp_path: Path) -> None:
     game = GameState.new_game(tmp_path)
-    inputs = iter(["e4"])
+    inputs = iter(["e4", "quit"])
     out = io.StringIO()
     runner = ConsoleGame(game=game, engine=ScriptedEngine(["e7e5"]), planner=make_planner(), fsm=Fsm(),
                          input_fn=lambda _p: next(inputs), out=out)
@@ -244,7 +253,8 @@ def test_a_verify_mismatch_is_reported_with_suspect_squares(tmp_path: Path) -> N
     runner._robot_exec = drop_the_piece_on_the_way  # type: ignore[method-assign]
     result = runner.run(chess.WHITE)
     assert "VERIFY failed, suspect squares: e5" in out.getvalue()
-    assert result.final_state is State.ERROR_RECOVER and game.pending_move == UCI("e7e5")
+    assert State.ERROR_RECOVER in runner.states_visited and result.final_state is State.IDLE
+    assert game.pending_move == UCI("e7e5")
 
 
 def test_end_of_input_stops_cleanly(tmp_path: Path) -> None:
@@ -256,6 +266,220 @@ def test_end_of_input_stops_cleanly(tmp_path: Path) -> None:
     runner = ConsoleGame(game=game, engine=ScriptedEngine([]), planner=make_planner(), fsm=Fsm(),
                          input_fn=Closed(), out=io.StringIO())
     assert runner.run(chess.WHITE).final_state is State.IDLE
+
+
+# --------------------------------------------------------------------------- #
+# Alarms and failures: ERROR_RECOVER end to end, the arm lock and the detector lock
+# --------------------------------------------------------------------------- #
+
+
+class Drive:
+    """A game scripted by state: the human plays ``moves``, every error is answered with ``resync``.
+
+    ``alarm`` is raised ONCE, the first time the loop enters ``alarm_in``.
+    """
+
+    def __init__(self, tmp_path: Path, moves: list[str], engine_moves: list[str], *, alarm: str | None = None,
+                 alarm_in: State | None = None, fen: str | None = None) -> None:
+        self.moves = list(moves)
+        self.alarm, self.alarm_in = alarm, alarm_in
+        self.fired = False
+        self.asked: list[tuple[State, str]] = []  # (state when the prompt appeared, prompt)
+        self.out = io.StringIO()
+        self.game = GameState.new_game(tmp_path, fen=fen)
+        self.runner = ConsoleGame(
+            game=self.game, engine=ScriptedEngine(engine_moves), planner=make_planner(), fsm=Fsm(),
+            input_fn=self._input, out=self.out, alarm_source=self._alarm,
+        )
+
+    def _alarm(self, state: State) -> str | None:
+        if self.alarm is not None and state is self.alarm_in and not self.fired:
+            self.fired = True
+            return self.alarm
+        return None
+
+    def _input(self, prompt: str) -> str:
+        state = self.runner.fsm.state
+        self.asked.append((state, prompt))
+        assert len(self.asked) < 60, f"runaway loop, last states: {self.runner.states_visited[-6:]}"
+        if state is State.ERROR_RECOVER:
+            return "resync"
+        return self.moves.pop(0) if self.moves else "quit"
+
+    def run(self, color: chess.Color = chess.WHITE) -> RunResult:
+        return self.runner.run(color)
+
+
+RUNNING_LOOP_STATES = [State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC, State.VERIFY]
+
+
+@pytest.mark.parametrize("alarm", ["ESTOP", "CAMERA_LOST"])
+@pytest.mark.parametrize("state", RUNNING_LOOP_STATES, ids=lambda s: s.value)
+def test_an_alarm_in_any_state_is_recovered_and_the_game_plays_on(tmp_path: Path, state: State, alarm: str) -> None:
+    drive = Drive(tmp_path, ["e4"], ["e7e5"], alarm=alarm, alarm_in=state)
+    result = drive.run()
+    runner = drive.runner
+    assert drive.fired and result.exit_code == 0 and result.final_state is State.IDLE
+    visited = runner.states_visited
+    after_alarm = visited[visited.index(state) + 1]
+    assert after_alarm is State.ERROR_RECOVER  # the FSM, not the runner, sent it there
+    assert [r.san for r in drive.game.history] == ["e4", "e5"]  # the game went on and nothing was lost or doubled
+    assert drive.game.pending_move is None
+    assert runner.world is not None
+    assert runner.world.squares() == {chess.square_name(q): p for q, p in drive.game.board.piece_map().items()}
+
+
+def test_estop_during_the_robot_chain_homes_and_redoes_the_move(tmp_path: Path) -> None:
+    drive = Drive(tmp_path, ["e4"], ["e7e5"], alarm="ESTOP", alarm_in=State.ROBOT_EXEC)
+    drive.run()
+    assert drive.runner.states_visited == [
+        State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC,
+        State.ERROR_RECOVER, State.HOMING, State.SETUP_CHECK, State.PLAN, State.ROBOT_EXEC, State.VERIFY,
+        State.WAIT_HUMAN, State.IDLE,
+    ]
+    assert "ALARM ESTOP" in drive.out.getvalue() and "Homing is mandatory" in drive.out.getvalue()
+
+
+def test_camera_loss_after_the_move_was_made_commits_it_instead_of_redoing_it(tmp_path: Path) -> None:
+    drive = Drive(tmp_path, ["e4"], ["e7e5"], alarm="CAMERA_LOST", alarm_in=State.VERIFY)
+    drive.run()
+    visited = drive.runner.states_visited
+    assert visited[visited.index(State.VERIFY):][:3] == [State.VERIFY, State.ERROR_RECOVER, State.WAIT_HUMAN]
+    assert len(drive.runner.chains) == 1  # the chain was NOT sent a second time
+    assert "board shows after" in drive.out.getvalue()
+    assert drive.game.history[-1].source is MoveSource.ENGINE
+
+
+def test_estop_in_verify_homes_and_then_commits_the_finished_move(tmp_path: Path) -> None:
+    drive = Drive(tmp_path, ["e4"], ["e7e5"], alarm="ESTOP", alarm_in=State.VERIFY)
+    drive.run()
+    visited = drive.runner.states_visited
+    assert visited[visited.index(State.VERIFY):][:5] == [
+        State.VERIFY, State.ERROR_RECOVER, State.HOMING, State.SETUP_CHECK, State.WAIT_HUMAN]
+    assert len(drive.runner.chains) == 1 and [r.san for r in drive.game.history] == ["e4", "e5"]
+
+
+def test_the_capture_slots_are_counted_once_when_a_finished_move_is_committed_on_recovery(tmp_path: Path) -> None:
+    fen = "4k3/8/8/2p5/3P4/8/4P3/4K3 b - - 0 1"
+    drive = Drive(tmp_path, ["e3"], ["c5d4", "d4e3"], alarm="CAMERA_LOST", alarm_in=State.VERIFY, fen=fen)
+    drive.run()
+    assert [r.san for r in drive.game.history] == ["cxd4", "e3", "dxe3"]
+    first, second = drive.runner.chains
+    assert first.capture_slots_used == (0,) and second.capture_slots_used == (1,)  # slot 0 was counted exactly once
+    assert drive.runner.inventory.capture_used == 2
+
+
+def test_an_alarm_typed_by_the_operator_is_sent_to_the_fsm(tmp_path: Path) -> None:
+    drive = Drive(tmp_path, ["alarm HB_TIMEOUT", "e4"], ["e7e5"])
+    result = drive.run()
+    visited = drive.runner.states_visited
+    assert visited[:5] == [State.SETUP_CHECK, State.WAIT_HUMAN, State.ERROR_RECOVER, State.HOMING, State.SETUP_CHECK]
+    assert result.exit_code == 0 and [r.san for r in drive.game.history] == ["e4", "e5"]
+
+
+def test_an_unknown_alarm_code_is_refused_and_the_game_goes_on(tmp_path: Path) -> None:
+    drive = Drive(tmp_path, ["alarm FIRE", "quit"], [])
+    drive.run()
+    assert "Unknown alarm 'FIRE'" in drive.out.getvalue()
+    assert State.ERROR_RECOVER not in drive.runner.states_visited
+
+
+def test_a_half_way_piece_blocks_resync_until_the_operator_fixes_the_board(tmp_path: Path) -> None:
+    drive = Drive(tmp_path, ["e4"], ["e7e5"])
+    runner = drive.runner
+    original = runner._robot_exec
+    dropped = []
+
+    def drop_the_piece_once() -> Optional[RunResult]:
+        result = original()
+        if not dropped:  # only the first attempt loses the pawn
+            dropped.append(True)
+            assert runner.world is not None
+            runner.world.pieces.pop("e5")
+        return result
+
+    runner._robot_exec = drop_the_piece_once  # type: ignore[method-assign]
+    commands = iter(["resync", "fixed", "resync"])
+    runner._input = lambda prompt: (  # type: ignore[assignment]
+        next(commands) if runner.fsm.state is State.ERROR_RECOVER else (drive.moves.pop(0) if drive.moves else "quit")
+    )
+    result = runner.run(chess.WHITE)
+    assert result.exit_code == 0
+    assert "A piece is half-way" in drive.out.getvalue()  # the first resync was refused: still ERROR_RECOVER
+    visited = runner.states_visited
+    first_error = visited.index(State.ERROR_RECOVER)
+    assert visited[first_error:first_error + 3] == [State.ERROR_RECOVER] * 3  # resync refused, fixed, then resync
+    assert visited[first_error + 3] is State.PLAN  # the kept move is planned again
+    assert [r.san for r in drive.game.history] == ["e4", "e5"] and drive.game.pending_move is None
+
+
+def test_the_stub_robot_refuses_to_move_when_the_fsm_says_no(tmp_path: Path) -> None:
+    from desktop_app.console_runner import ArmLockedError, StubRobot
+
+    game = GameState.new_game(tmp_path)
+    planner = make_planner()
+    chain = planner.plan(chess.Board(), UCI("e2e4"))
+    world = PhysicalWorld(game.board, {})
+    locked = StubRobot(world, may_move=lambda: False)
+    for action in (locked.home, lambda: locked.execute(chain), lambda: locked.park(chain)):
+        with pytest.raises(ArmLockedError):
+            action()
+    allowed = StubRobot(world, may_move=lambda: True)
+    allowed.home()
+    allowed.execute(chain)
+
+
+def test_the_arm_moves_only_in_homing_robot_exec_and_verify_through_a_whole_messy_game(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from desktop_app.console_runner import StubRobot
+
+    drive = Drive(tmp_path, ["e4", "alarm CAMERA_LOST", "Nf3"], ["e7e5", "b8c6"], alarm="ESTOP", alarm_in=State.ROBOT_EXEC)
+    moved_in: list[State] = []
+    originals = {name: getattr(StubRobot, name) for name in ("home", "execute", "park")}
+
+    def spy(name: str):  # type: ignore[no-untyped-def]
+        def wrapper(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            moved_in.append(drive.runner.fsm.state)
+            return originals[name](self, *args, **kwargs)
+
+        return wrapper
+
+    for name in originals:
+        monkeypatch.setattr(StubRobot, name, spy(name))
+    result = drive.run()
+    assert result.exit_code == 0
+    assert set(moved_in) == {State.HOMING, State.ROBOT_EXEC, State.VERIFY}  # all three, and nothing else
+    assert State.ERROR_RECOVER in drive.runner.states_visited
+
+
+def test_engine_and_planner_work_happens_only_in_compute_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    drive = Drive(tmp_path, ["e4", "Nf3"], ["e7e5", "b8c6"])
+    runner = drive.runner
+    seen: list[tuple[str, State, bool]] = []
+    real_best, real_plan = runner.engine.best_move, runner.planner.plan
+
+    def best(fen: str) -> chess.Move:
+        seen.append(("engine", runner.fsm.state, runner.fsm.arm_may_move))
+        return real_best(fen)
+
+    def plan(*args, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(("plan", runner.fsm.state, runner.fsm.arm_may_move))
+        return real_plan(*args, **kwargs)
+
+    monkeypatch.setattr(runner.engine, "best_move", best)
+    monkeypatch.setattr(runner.planner, "plan", plan)
+    drive.run()
+    assert {(name, state) for name, state, _ in seen} == {("engine", State.ENGINE_THINK), ("plan", State.PLAN)}
+    assert not any(arm for _, _, arm in seen)  # nothing physical can happen while computing
+
+
+def test_the_human_is_asked_for_a_move_only_in_wait_human(tmp_path: Path) -> None:
+    drive = Drive(tmp_path, ["e4", "alarm CAMERA_LOST", "Nf3"], ["e7e5", "b8c6"], alarm="ESTOP", alarm_in=State.PLAN)
+    drive.run()
+    move_prompts = [state for state, prompt in drive.asked if "(you) move" in prompt]
+    assert move_prompts and set(move_prompts) == {State.WAIT_HUMAN}  # detection stays locked everywhere else
+    assert {state for state, _ in drive.asked} <= {State.WAIT_HUMAN, State.ERROR_RECOVER, State.PAUSED}
 
 
 # --------------------------------------------------------------------------- #
