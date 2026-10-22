@@ -16,8 +16,12 @@ Failures (7.2):
     ERROR_RECOVER. "Running" is every state except IDLE (program off), GAME_OVER (nothing in
     flight) and ERROR_RECOVER itself. An alarm that arrives while already in ERROR_RECOVER keeps the
     state but can make homing mandatory.
-  * ERROR_RECOVER leaves only through RESYNC, to WAIT_HUMAN, PLAN, HOMING or GAME_OVER. pending_move
-    is kept. The exit is chosen from the game, never from the camera (see ``_on_resync``).
+  * ERROR_RECOVER leaves only through RESYNC, to WAIT_HUMAN, PLAN, ENGINE_THINK, HOMING or
+    GAME_OVER. pending_move is kept. The exit is chosen from the game, never from the camera (see
+    ``_on_resync``).
+
+Startup (7.2): INIT -> CALIBRATE -> HOMING -> SETUP_CHECK. Homing is mandatory at every startup, so
+CALIBRATE_DONE leads to HOMING, never straight to SETUP_CHECK.
 
 Locks (7.2): the arm moves only in HOMING, ROBOT_EXEC and VERIFY (``arm_may_move``); ENGINE_THINK
 and PLAN only compute (``compute_only``); move detection is locked in every state except WAIT_HUMAN
@@ -120,7 +124,7 @@ DETECTING_STATES = frozenset({State.WAIT_HUMAN})
 TRANSITIONS: Mapping[tuple[State, Trigger], frozenset[State]] = {
     (S.IDLE, T.YOLO_ON): frozenset({S.INIT}),
     (S.INIT, T.INIT_DONE): frozenset({S.CALIBRATE}),
-    (S.CALIBRATE, T.CALIBRATE_DONE): frozenset({S.SETUP_CHECK, S.IDLE}),
+    (S.CALIBRATE, T.CALIBRATE_DONE): frozenset({S.HOMING, S.IDLE}),
     (S.HOMING, T.HOMING_DONE): frozenset({S.SETUP_CHECK, S.IDLE}),
     (S.SETUP_CHECK, T.START): frozenset({S.WAIT_HUMAN, S.ENGINE_THINK, S.PLAN}),
     (S.WAIT_HUMAN, T.HUMAN_MOVE): frozenset({S.COMMIT_HUMAN}),
@@ -135,7 +139,7 @@ TRANSITIONS: Mapping[tuple[State, Trigger], frozenset[State]] = {
     (S.VERIFY, T.VERIFY_OK): frozenset({S.WAIT_HUMAN, S.GAME_OVER, S.PAUSED, S.IDLE}),
     (S.VERIFY, T.VERIFY_FAILED): frozenset({S.ERROR_RECOVER}),
     (S.PAUSED, T.RESUME): frozenset({S.WAIT_HUMAN, S.PLAN, S.ROBOT_EXEC}),
-    (S.ERROR_RECOVER, T.RESYNC): frozenset({S.HOMING, S.PLAN, S.WAIT_HUMAN, S.GAME_OVER}),
+    (S.ERROR_RECOVER, T.RESYNC): frozenset({S.HOMING, S.PLAN, S.ENGINE_THINK, S.WAIT_HUMAN, S.GAME_OVER}),
     (S.ERROR_RECOVER, T.ALARM): frozenset({S.ERROR_RECOVER}),  # stays; may make homing mandatory
     (S.GAME_OVER, T.NEW_GAME): frozenset({S.SETUP_CHECK}),
     (S.GAME_OVER, T.RESTART): frozenset({S.INIT}),
@@ -387,7 +391,7 @@ class Fsm:
     def _on_calibrate_done(self, trigger: Trigger, payload: Mapping[str, Any]) -> _Decision:
         if self._state is not S.CALIBRATE:
             return self._wrong_state(trigger)
-        return self._route(S.SETUP_CHECK, "calibration and homing done")
+        return self._route(S.HOMING, "calibration done")
 
     def _on_homing_done(self, trigger: Trigger, payload: Mapping[str, Any]) -> _Decision:
         if self._state is not S.HOMING:
@@ -516,7 +520,7 @@ class Fsm:
         return self._route(S.WAIT_HUMAN, "position verified and engine move committed")
 
     def _on_resync(self, trigger: Trigger, payload: Mapping[str, Any]) -> _Decision:
-        """Leave ERROR_RECOVER: to HOMING, GAME_OVER, PLAN or WAIT_HUMAN (SPEC 7.2).
+        """Leave ERROR_RECOVER: to HOMING, GAME_OVER, PLAN, ENGINE_THINK or WAIT_HUMAN (SPEC 7.2).
 
         The exit comes from GameState (read-only), never from the camera. In this order:
           1. homing is mandatory (alarm, or the error hit before a game was running) -> HOMING;
@@ -524,8 +528,8 @@ class Fsm:
           3. an engine move is pending -> PLAN (pending_move is kept and redone);
           4. it is the human's turn -> WAIT_HUMAN;
           5. otherwise it is the engine's turn with no stored move (the engine failed, or the human
-             move was just committed): the table has no exit to ENGINE_THINK, so go through HOMING
-             and SETUP_CHECK, whose Start asks the engine again.
+             move was just committed) and homing is not required -> ENGINE_THINK, which asks the
+             engine again from the FEN in GameState.
         """
         if self._state is not S.ERROR_RECOVER:
             return self._wrong_state(trigger)
@@ -540,7 +544,7 @@ class Fsm:
             return _Decision(True, "redo the kept pending move", S.PLAN)
         if game.turn == self._human_color:
             return _Decision(True, "back to the human's turn", S.WAIT_HUMAN)
-        return _Decision(True, "no pending move: re-enter through HOMING and SETUP_CHECK", S.HOMING)
+        return _Decision(True, "the engine's turn with no pending move: ask the engine again", S.ENGINE_THINK)
 
     def _on_new_game(self, trigger: Trigger, payload: Mapping[str, Any]) -> _Decision:
         if self._state is not S.GAME_OVER:

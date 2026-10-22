@@ -1,9 +1,9 @@
 """Placeholders stay detectable until phase 5 (SPEC 7.2, "Rules clarified in phase 2").
 
-Grasp angles and reserve slot contents are [TO CONFIRM], so every value that is not explicitly
-confirmed is a PLACEHOLDER. The phase 3 Robot Commander will refuse a real serial port while
-``MovePlanner.placeholders()`` is not empty. The guard itself is NOT built here; these tests prove
-that the information it needs is correct and cannot be lost by accident.
+Grasp angles, reserve slot contents and the capture/reserve/park layout are [TO CONFIRM], so every
+value that is not explicitly confirmed is a PLACEHOLDER. The phase 3 Robot Commander will use
+``MovePlanner.placeholders()`` to guard a real serial port. The guard itself is NOT built here; these
+tests prove that the information it needs is correct and cannot be lost by accident.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import pytest
 
 from desktop_app import console_runner
 from desktop_app.core.move_planner import GraspProfiles, MovePlanner, ReserveSlot
+from desktop_app.kinematics.dimension import Zones
 from phase2_support import (
     TEST_GRASP,
     TEST_RESERVE,
@@ -31,11 +32,16 @@ E2E4 = chess.Move.from_uci("e2e4")
 Q, R, B, N = chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT
 
 
-def planner_with(grasp: GraspProfiles, reserve: tuple[object, ...]) -> MovePlanner:
+def planner_with(grasp: GraspProfiles, reserve: tuple[object, ...], *, zones_placeholder: bool = True) -> MovePlanner:
+    """A planner whose zone layout is a placeholder unless ``zones_placeholder=False``."""
     return MovePlanner(
-        make_workspace(), make_geometry(), make_zones(reserve_slots=len(reserve)), grasp,
-        reserve_pieces=reserve,  # type: ignore[arg-type]
+        make_workspace(), make_geometry(), make_zones(reserve_slots=len(reserve), is_placeholder=zones_placeholder),
+        grasp, reserve_pieces=reserve,  # type: ignore[arg-type]
     )
+
+
+def confirmed_reserve() -> tuple[ReserveSlot, ...]:
+    return tuple(ReserveSlot(piece, is_placeholder=False) for piece in TEST_RESERVE)
 
 
 def real_grasp(tmp_path: Path) -> GraspProfiles:
@@ -98,34 +104,43 @@ def test_bare_piece_types_count_as_placeholder_slots() -> None:
 def test_everything_is_listed_while_nothing_is_confirmed() -> None:
     planner = make_planner()
     assert planner.placeholders() == (
-        "grasp_profiles", "reserve_slot[0]", "reserve_slot[1]", "reserve_slot[2]", "reserve_slot[3]",
+        "grasp_profiles", "zones", "reserve_slot[0]", "reserve_slot[1]", "reserve_slot[2]", "reserve_slot[3]",
     )
     assert planner.has_placeholders
 
 
-def test_only_the_reserve_slots_are_listed_once_the_grasp_angles_are_confirmed(tmp_path: Path) -> None:
-    planner = planner_with(real_grasp(tmp_path), TEST_RESERVE)
+def test_only_the_reserve_slots_are_listed_once_the_grasp_angles_and_zones_are_confirmed(tmp_path: Path) -> None:
+    planner = planner_with(real_grasp(tmp_path), TEST_RESERVE, zones_placeholder=False)
     assert planner.placeholders() == ("reserve_slot[0]", "reserve_slot[1]", "reserve_slot[2]", "reserve_slot[3]")
     assert planner.has_placeholders
 
 
-def test_only_the_grasp_profile_is_listed_once_the_reserve_slots_are_confirmed() -> None:
-    reserve = tuple(ReserveSlot(piece, is_placeholder=False) for piece in TEST_RESERVE)
-    planner = planner_with(GraspProfiles.from_dict(TEST_GRASP), reserve)
+def test_only_the_grasp_profile_is_listed_once_the_reserve_slots_and_zones_are_confirmed() -> None:
+    planner = planner_with(GraspProfiles.from_dict(TEST_GRASP), confirmed_reserve(), zones_placeholder=False)
     assert planner.placeholders() == ("grasp_profiles",)
     assert planner.has_placeholders
 
 
+def test_only_the_zone_layout_is_listed_once_the_grasp_angles_and_reserve_slots_are_confirmed(tmp_path: Path) -> None:
+    planner = planner_with(real_grasp(tmp_path), confirmed_reserve(), zones_placeholder=True)
+    assert planner.placeholders() == ("zones",)
+    assert planner.has_placeholders
+
+
+def test_the_zone_layout_is_listed_between_the_grasp_profile_and_the_reserve_slots() -> None:
+    names = make_planner().placeholders()
+    assert names.index("grasp_profiles") < names.index("zones") < names.index("reserve_slot[0]")
+
+
 def test_one_unconfirmed_slot_is_enough_to_keep_the_planner_flagged(tmp_path: Path) -> None:
     reserve = (ReserveSlot(Q, False), ReserveSlot(R, False), ReserveSlot(B, True), ReserveSlot(N, False))
-    planner = planner_with(real_grasp(tmp_path), reserve)
+    planner = planner_with(real_grasp(tmp_path), reserve, zones_placeholder=False)
     assert planner.placeholders() == ("reserve_slot[2]",)
     assert planner.has_placeholders
 
 
 def test_nothing_is_listed_only_when_every_value_is_confirmed(tmp_path: Path) -> None:
-    reserve = tuple(ReserveSlot(piece, is_placeholder=False) for piece in TEST_RESERVE)
-    planner = planner_with(real_grasp(tmp_path), reserve)
+    planner = planner_with(real_grasp(tmp_path), confirmed_reserve(), zones_placeholder=False)
     assert planner.placeholders() == ()
     assert not planner.has_placeholders
     assert planner.grasp is not None and not planner.grasp.is_placeholder
@@ -133,24 +148,45 @@ def test_nothing_is_listed_only_when_every_value_is_confirmed(tmp_path: Path) ->
 
 def test_mixed_input_keeps_each_slot_flag_in_zone_order() -> None:
     reserve = (ReserveSlot(Q, False), R, ReserveSlot(B, True), N)  # a bare piece type is a placeholder
-    planner = planner_with(GraspProfiles.from_dict(TEST_GRASP, placeholder=False), reserve)
+    planner = planner_with(GraspProfiles.from_dict(TEST_GRASP, placeholder=False), reserve, zones_placeholder=False)
     assert planner.reserve_pieces == (Q, R, B, N)
     assert planner.placeholders() == ("reserve_slot[1]", "reserve_slot[2]", "reserve_slot[3]")
 
 
 def test_the_flag_is_information_only_the_chain_is_the_same(tmp_path: Path) -> None:
     placeholder = make_planner()
-    confirmed = planner_with(
-        real_grasp(tmp_path), tuple(ReserveSlot(piece, is_placeholder=False) for piece in TEST_RESERVE)
-    )
+    confirmed = planner_with(real_grasp(tmp_path), confirmed_reserve(), zones_placeholder=False)
     board = chess.Board()
     assert placeholder.plan(board, E2E4).describe() == confirmed.plan(board, E2E4).describe()
     assert placeholder.has_placeholders and not confirmed.has_placeholders
 
 
 def test_a_planner_without_a_reserve_zone_has_no_reserve_placeholders(tmp_path: Path) -> None:
-    planner = MovePlanner(make_workspace(), make_geometry(), make_zones(reserve_slots=None), real_grasp(tmp_path))
+    planner = MovePlanner(
+        make_workspace(), make_geometry(), make_zones(reserve_slots=None, is_placeholder=False), real_grasp(tmp_path)
+    )
     assert planner.reserve_slots == () and planner.placeholders() == ()
+
+
+# --------------------------------------------------------------------------- #
+# The capture/reserve/park layout
+# --------------------------------------------------------------------------- #
+
+
+def test_the_runners_proposed_layout_is_listed_as_a_placeholder(tmp_path: Path) -> None:
+    """``Zones.proposed`` is the owner's proposal, still [TO CONFIRM] on the real board."""
+    proposed = Zones.proposed(make_geometry(), make_workspace())
+    assert proposed.is_placeholder
+    planner = MovePlanner(
+        make_workspace(), make_geometry(), proposed, real_grasp(tmp_path), reserve_pieces=confirmed_reserve()
+    )
+    assert planner.placeholders() == ("zones",)
+
+
+def test_an_incomplete_zone_layout_is_still_flagged(tmp_path: Path) -> None:
+    layout = Zones(make_geometry(), make_workspace())  # nothing defined yet, so nothing is confirmed either
+    planner = MovePlanner(make_workspace(), make_geometry(), layout, real_grasp(tmp_path))
+    assert planner.placeholders() == ("zones",)
 
 
 # --------------------------------------------------------------------------- #
@@ -161,9 +197,9 @@ def test_a_planner_without_a_reserve_zone_has_no_reserve_placeholders(tmp_path: 
 def test_the_runner_demo_values_are_all_placeholders() -> None:
     grasp = GraspProfiles.from_dict(console_runner.PLACEHOLDER_GRASP, placeholder=True)
     reserve = tuple(ReserveSlot(piece, is_placeholder=True) for piece in console_runner.PLACEHOLDER_RESERVE_PIECES)
-    planner = planner_with(grasp, reserve)
+    planner = planner_with(grasp, reserve)  # the runner builds its layout with Zones.proposed: a placeholder
     assert planner.placeholders() == (
-        "grasp_profiles", "reserve_slot[0]", "reserve_slot[1]", "reserve_slot[2]", "reserve_slot[3]",
+        "grasp_profiles", "zones", "reserve_slot[0]", "reserve_slot[1]", "reserve_slot[2]", "reserve_slot[3]",
     )
 
 
@@ -174,3 +210,4 @@ def test_the_command_line_lists_what_is_still_a_placeholder(
     assert console_runner.main(["--demo-placeholders", "--data-dir", str(tmp_path), "--new"]) == 0
     printed = capsys.readouterr().out
     assert "Still placeholders" in printed and "grasp_profiles" in printed and "reserve_slot[3]" in printed
+    assert "grasp_profiles, zones, reserve_slot[0]" in printed  # the zone layout is listed too

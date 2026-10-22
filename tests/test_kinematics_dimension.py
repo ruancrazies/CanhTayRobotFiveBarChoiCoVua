@@ -242,6 +242,42 @@ def test_is_defined_rejects_unknown_names(board: BoardGeometry, workspace: Works
         Zones(board, workspace).is_defined("bin")
 
 
+# ---- the is_placeholder flag (SPEC 7.2, "Rules clarified in phase 2") ------- #
+
+FULL_LAYOUT = {"capture_zone": TEST_SLOTS_LEFT, "reserve_zone": TEST_SLOTS_RIGHT, "park_position": TEST_PARK}
+
+
+def test_a_layout_is_a_placeholder_unless_it_says_it_is_confirmed(board: BoardGeometry, workspace: Workspace) -> None:
+    assert Zones(board, workspace).is_placeholder  # fail-safe default, even with nothing defined
+    assert Zones(board, workspace, **FULL_LAYOUT).is_placeholder  # valid coordinates alone do not confirm anything
+    assert Zones(board, workspace, is_placeholder=True, **FULL_LAYOUT).is_placeholder
+    assert not Zones(board, workspace, is_placeholder=False, **FULL_LAYOUT).is_placeholder
+
+
+@pytest.mark.parametrize("bad", [0, 1, None, "", "no", "False", 0.0, [], ()], ids=repr)
+def test_the_placeholder_flag_must_be_a_real_bool(board: BoardGeometry, workspace: Workspace, bad: Any) -> None:
+    """A falsy non-bool such as 0 or None must never be read as 'confirmed'."""
+    with pytest.raises(ZoneValidationError, match="is_placeholder"):
+        Zones(board, workspace, is_placeholder=bad, **FULL_LAYOUT)
+
+
+def test_the_placeholder_flag_cannot_be_changed_by_assignment(board: BoardGeometry, workspace: Workspace) -> None:
+    zones = Zones(board, workspace, **FULL_LAYOUT)
+    with pytest.raises(AttributeError):
+        zones.is_placeholder = False  # type: ignore[misc]
+    assert zones.is_placeholder
+
+
+def test_the_flag_changes_nothing_but_the_flag(board: BoardGeometry, workspace: Workspace) -> None:
+    placeholder = Zones(board, workspace, **FULL_LAYOUT)
+    confirmed = Zones(board, workspace, is_placeholder=False, **FULL_LAYOUT)
+    assert (confirmed.capture_zone, confirmed.reserve_zone, confirmed.park_position, confirmed.undefined) == (
+        placeholder.capture_zone, placeholder.reserve_zone, placeholder.park_position, placeholder.undefined
+    )
+    with pytest.raises(ZoneValidationError, match="on the board"):  # a confirmed layout is still validated
+        Zones(board, workspace, capture_zone=[(0.0, 300.0)], is_placeholder=False)
+
+
 # ---- the proposed layout (still [TO CONFIRM]) ------------------------------ #
 
 
@@ -277,6 +313,11 @@ def test_proposed_zones_validate_every_slot(
         assert model.is_reachable(*slot), slot
         assert model.margin_at_point(*slot) >= MIN_SINGULARITY_MARGIN_DEG, slot
     assert any("PROPOSED" in r.getMessage() and "TO CONFIRM" in r.getMessage() for r in caplog.records)
+
+
+def test_the_proposed_layout_is_always_a_placeholder(board: BoardGeometry, workspace: Workspace) -> None:
+    """The owner's proposal is still [TO CONFIRM] on the real board, so it can never read as confirmed."""
+    assert Zones.proposed(board, workspace).is_placeholder
 
 
 def test_proposed_margins(model: FiveBarKinematics) -> None:

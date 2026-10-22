@@ -24,10 +24,11 @@ Assumptions the SPEC does not spell out (flagged in the phase 2 report):
   * the pawn that is promoted goes to the next free capture slot ("off the board");
   * the reserve zone holds spare pieces of the robot's own colour, one per slot, and the piece
     type of each slot is given to the planner (``reserve_pieces``);
-  * grasp angles and reserve slot contents stay PLACEHOLDERS until phase 5. They are fail-safe:
-    a value is real only when it says so (``GraspProfiles.from_file`` or
-    ``ReserveSlot(is_placeholder=False)``). ``MovePlanner.placeholders()`` lists what is still a
-    placeholder, so the phase 3 Robot Commander can refuse a real serial port while any is left;
+  * grasp angles, reserve slot contents and the capture/reserve/park layout stay PLACEHOLDERS until
+    phase 5. They are fail-safe: a value is real only when it says so (``GraspProfiles.from_file``,
+    ``ReserveSlot(is_placeholder=False)`` or ``Zones(is_placeholder=False)``).
+    ``MovePlanner.placeholders()`` lists what is still a placeholder, so the phase 3 Robot
+    Commander can see it before it drives a real serial port;
   * the arm starts every chain at the park position and ``MoveChain.park_leg`` is the validated
     return trip from the last drop point to the park position (VERIFY sends it).
 """
@@ -396,12 +397,15 @@ class MovePlanner:
         return self._grasp
 
     def placeholders(self) -> tuple[str, ...]:
-        """Everything that is still a placeholder: ``"grasp_profiles"`` and ``"reserve_slot[i]"``.
+        """Everything that is still a placeholder, in this order: ``"grasp_profiles"``, ``"zones"``
+        (the capture/reserve/park layout) and ``"reserve_slot[i]"`` (one per unconfirmed slot content).
 
-        Empty only when every grasp angle and every reserve slot content is confirmed. The phase 3
-        Robot Commander refuses a real serial port while this is not empty (SPEC 7.2).
+        Empty only when every grasp angle, the zone layout and every reserve slot content is
+        confirmed. The phase 3 Robot Commander uses this to guard a real serial port (SPEC 7.2).
         """
         found: list[str] = ["grasp_profiles"] if self._grasp.is_placeholder else []
+        if self._zones.is_placeholder:
+            found.append("zones")
         found += [f"reserve_slot[{i}]" for i, slot in enumerate(self._reserve_slots) if slot.is_placeholder]
         return tuple(found)
 

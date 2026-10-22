@@ -33,11 +33,11 @@ def shutdown_during_robot_exec(data_dir: Path) -> tuple[str, str]:
 
 
 def restart(data_dir: Path) -> tuple[GameState, Fsm]:
-    """A new process: load the game, then INIT -> CALIBRATE -> SETUP_CHECK."""
+    """A new process: load the game, then INIT -> CALIBRATE -> HOMING -> SETUP_CHECK."""
     game = GameState.load(data_dir)
     assert game is not None
     fsm = Fsm(game)
-    for trigger in (T.YOLO_ON, T.INIT_DONE, T.CALIBRATE_DONE):
+    for trigger in (T.YOLO_ON, T.INIT_DONE, T.CALIBRATE_DONE, T.HOMING_DONE):
         assert fsm.handle(trigger).accepted
     assert fsm.state is S.SETUP_CHECK
     return game, fsm

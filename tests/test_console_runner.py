@@ -69,6 +69,12 @@ def roles(runner: ConsoleGame) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+def test_the_game_starts_by_homing_the_stub_robot_before_setup_check(tmp_path: Path) -> None:
+    runner, _, output, _ = play(tmp_path, ["quit"], [])
+    assert runner.states_visited[:3] == [State.HOMING, State.SETUP_CHECK, State.WAIT_HUMAN]
+    assert output.count("Homing (stub)") == 1  # INIT -> CALIBRATE -> HOMING -> SETUP_CHECK
+
+
 def test_a_full_game_plays_to_checkmate_with_the_command_chains_printed(tmp_path: Path) -> None:
     runner, result, output, _ = play(tmp_path, ["f3", "g4"], ["e7e5", "d8h4"])
     assert result == RunResult(0, State.GAME_OVER, "0-1 checkmate")
@@ -194,13 +200,12 @@ def test_an_engine_error_is_reported_and_can_be_retried(tmp_path: Path) -> None:
                 raise EngineUnavailableError("no answer")
             return super().best_move(fen)
 
-    # engine fails -> ERROR_RECOVER -> resync -> HOMING -> SETUP_CHECK -> Start asks the engine again
+    # engine fails -> ERROR_RECOVER -> resync -> ENGINE_THINK asks the engine again (no homing: the arm never moved)
     runner, result, output, _ = play(tmp_path, ["e4", "resync", "quit"], [], engine=Flaky(["e7e5"]))
     assert "Engine error: no answer" in output
     assert runner.states_visited == [
-        State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.ERROR_RECOVER, State.HOMING,
-        State.SETUP_CHECK, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC, State.VERIFY,
-        State.WAIT_HUMAN, State.IDLE,
+        State.HOMING, State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.ERROR_RECOVER,
+        State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC, State.VERIFY, State.WAIT_HUMAN, State.IDLE,
     ]
     assert [r.san for r in runner.game.history] == ["e4", "e5"]
 
@@ -310,7 +315,9 @@ class Drive:
         return self.runner.run(color)
 
 
-RUNNING_LOOP_STATES = [State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC, State.VERIFY]
+RUNNING_LOOP_STATES = [
+    State.HOMING, State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC, State.VERIFY,
+]
 
 
 @pytest.mark.parametrize("alarm", ["ESTOP", "CAMERA_LOST"])
@@ -333,7 +340,7 @@ def test_estop_during_the_robot_chain_homes_and_redoes_the_move(tmp_path: Path) 
     drive = Drive(tmp_path, ["e4"], ["e7e5"], alarm="ESTOP", alarm_in=State.ROBOT_EXEC)
     drive.run()
     assert drive.runner.states_visited == [
-        State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC,
+        State.HOMING, State.SETUP_CHECK, State.WAIT_HUMAN, State.ENGINE_THINK, State.PLAN, State.ROBOT_EXEC,
         State.ERROR_RECOVER, State.HOMING, State.SETUP_CHECK, State.PLAN, State.ROBOT_EXEC, State.VERIFY,
         State.WAIT_HUMAN, State.IDLE,
     ]
@@ -373,7 +380,8 @@ def test_an_alarm_typed_by_the_operator_is_sent_to_the_fsm(tmp_path: Path) -> No
     drive = Drive(tmp_path, ["alarm HB_TIMEOUT", "e4"], ["e7e5"])
     result = drive.run()
     visited = drive.runner.states_visited
-    assert visited[:5] == [State.SETUP_CHECK, State.WAIT_HUMAN, State.ERROR_RECOVER, State.HOMING, State.SETUP_CHECK]
+    assert visited[:6] == [
+        State.HOMING, State.SETUP_CHECK, State.WAIT_HUMAN, State.ERROR_RECOVER, State.HOMING, State.SETUP_CHECK]
     assert result.exit_code == 0 and [r.san for r in drive.game.history] == ["e4", "e5"]
 
 

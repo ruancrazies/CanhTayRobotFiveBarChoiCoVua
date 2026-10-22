@@ -261,7 +261,9 @@ class ConsoleGame:
         fsm, game = self.fsm, self.game
         self._human_color = human_color
         fsm.attach_game_state(game)
-        for trigger in (Trigger.YOLO_ON, Trigger.INIT_DONE, Trigger.CALIBRATE_DONE):  # stubbed: nothing to connect
+        # INIT and CALIBRATE are stubbed (nothing to connect). The FSM then enters HOMING, which the loop
+        # below performs, and only after that SETUP_CHECK: INIT -> CALIBRATE -> HOMING -> SETUP_CHECK.
+        for trigger in (Trigger.YOLO_ON, Trigger.INIT_DONE, Trigger.CALIBRATE_DONE):
             fsm.handle(trigger)
         self._build_world(human_color)
 

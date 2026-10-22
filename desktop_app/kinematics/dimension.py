@@ -8,6 +8,11 @@ The capture zone, the reserve zone (each a list of slots) and the park position 
 provided, raises :class:`ZoneNotDefinedError` when one is requested too early, and
 validates every provided slot (off the board, inside the workspace, mu >= the margin).
 ``Zones.proposed`` builds the owner's PROPOSED layout, which is still [TO CONFIRM].
+
+The layout also carries an ``is_placeholder`` flag (SPEC 7.2, "Rules clarified in phase 2"). It is
+fail-safe: a layout is a placeholder unless the caller says it was confirmed on the real board
+(``is_placeholder=False``). ``MovePlanner.placeholders()`` reports it so the phase 3 Robot Commander
+can see that the coordinates are not real yet.
 """
 
 from __future__ import annotations
@@ -183,6 +188,12 @@ class Zones:
     Every slot and the park point are validated immediately: off the board (the board
     border counts as board), inside the workspace, and mu >= the workspace margin.
     Slots must be distinct, also across zones. Coordinates are mm in the robot frame.
+
+    ``is_placeholder`` says whether the whole layout (capture, reserve and park together) is still
+    unconfirmed on the real board. Fail-safe default: ``True``. Pass ``is_placeholder=False`` only
+    for coordinates that were measured and confirmed on the real board (phase 5). The flag is
+    read-only after construction and does not change validation or behaviour; it is information
+    for the guard.
     """
 
     def __init__(
@@ -193,7 +204,12 @@ class Zones:
         capture_zone: Sequence[Point] | None = None,
         reserve_zone: Sequence[Point] | None = None,
         park_position: Point | None = None,
+        is_placeholder: bool = True,
     ) -> None:
+        # Strict on purpose: a falsy non-bool (0, None, "") must never read as "confirmed".
+        if not isinstance(is_placeholder, bool):
+            raise ZoneValidationError(f"is_placeholder must be True or False, got {is_placeholder!r}")
+        self._is_placeholder = is_placeholder
         self._board = board
         self._workspace = workspace
         capture = self._validate_slots("capture_zone", capture_zone)
@@ -207,7 +223,9 @@ class Zones:
     def proposed(cls, board: BoardGeometry, workspace: Workspace) -> "Zones":
         """The proposed layout (15 capture slots, 4 reserve slots, park at (0, 120)), validated.
 
-        These values are [TO CONFIRM] on the real board; a warning is logged on every call.
+        These values are [TO CONFIRM] on the real board; a warning is logged on every call. The
+        returned layout is always a placeholder (``is_placeholder`` is ``True``): confirming it means
+        building ``Zones(..., is_placeholder=False)`` from the coordinates measured on the real board.
         """
         logger.warning(
             "using the PROPOSED capture/reserve/park layout, which is [TO CONFIRM] on the real board "
@@ -222,7 +240,13 @@ class Zones:
             capture_zone=PROPOSED_CAPTURE_SLOTS,
             reserve_zone=PROPOSED_RESERVE_SLOTS,
             park_position=PROPOSED_PARK_POSITION,
+            is_placeholder=True,
         )
+
+    @property
+    def is_placeholder(self) -> bool:
+        """True until the capture, reserve and park layout is confirmed on the real board."""
+        return self._is_placeholder
 
     def _validate_point(self, name: str, point: Any) -> Point:
         try:

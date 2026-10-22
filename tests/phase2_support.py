@@ -128,14 +128,18 @@ def make_zones(
     capture_slots: Optional[int] = len(PROPOSED_CAPTURE_SLOTS),
     reserve_slots: Optional[int] = len(PROPOSED_RESERVE_SLOTS),
     park: bool = True,
+    is_placeholder: bool = True,
 ) -> Zones:
-    """Zones validated with the standard workspace; ``None`` leaves a zone undefined ([TO CONFIRM])."""
+    """Zones validated with the standard workspace; ``None`` leaves a zone undefined ([TO CONFIRM]).
+
+    The layout is a placeholder unless a test says otherwise (``is_placeholder=False``)."""
     return Zones(
         make_geometry(),
         make_workspace(),
         capture_zone=PROPOSED_CAPTURE_SLOTS[:capture_slots] if capture_slots is not None else None,
         reserve_zone=PROPOSED_RESERVE_SLOTS[:reserve_slots] if reserve_slots is not None else None,
         park_position=PROPOSED_PARK_POSITION if park else None,
+        is_placeholder=is_placeholder,
     )
 
 
@@ -145,12 +149,13 @@ def make_planner(
     reserve_pieces: tuple[chess.PieceType, ...] = TEST_RESERVE,
     workspace: Optional[Workspace] = None,
     park: bool = True,
+    zones_placeholder: bool = True,
 ) -> MovePlanner:
     reserve_slots = len(reserve_pieces) if reserve_pieces else None
     return MovePlanner(
         workspace or make_workspace(),
         make_geometry(),
-        make_zones(capture_slots, reserve_slots, park),
+        make_zones(capture_slots, reserve_slots, park, is_placeholder=zones_placeholder),
         GraspProfiles.from_dict(TEST_GRASP),
         reserve_pieces=reserve_pieces,
     )
@@ -188,6 +193,9 @@ class Rig:
         if target is State.CALIBRATE:
             return self
         self.do(Trigger.CALIBRATE_DONE)
+        if target is State.HOMING:  # the startup HOMING: INIT -> CALIBRATE -> HOMING -> SETUP_CHECK
+            return self
+        self.do(Trigger.HOMING_DONE)
         if target is State.SETUP_CHECK:
             return self
         self.do(Trigger.START, human_color=self.human)
@@ -225,10 +233,6 @@ class Rig:
             return self
         if target is State.ERROR_RECOVER:
             self.do(Trigger.EXEC_FAILED)
-            return self
-        if target is State.HOMING:
-            self.do(Trigger.EXEC_FAILED, alarm="ESTOP")
-            self.do(Trigger.RESYNC)
             return self
         raise AssertionError(f"cannot reach {target}")
 

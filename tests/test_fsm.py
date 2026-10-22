@@ -39,8 +39,9 @@ UCI = chess.Move.from_uci
 SPEC_TABLE: dict[tuple[State, Trigger], State | None] = {
     (S.IDLE, T.YOLO_ON): S.INIT,                       # IDLE -> INIT when YOLO is switched on
     (S.INIT, T.INIT_DONE): S.CALIBRATE,                # INIT -> CALIBRATE
-    (S.CALIBRATE, T.CALIBRATE_DONE): S.SETUP_CHECK,    # CALIBRATE / HOMING -> SETUP_CHECK
-    (S.HOMING, T.HOMING_DONE): S.SETUP_CHECK,
+    (S.CALIBRATE, T.CALIBRATE_DONE): S.HOMING,         # CALIBRATE -> HOMING (mandatory at every startup)
+    (S.HOMING, T.HOMING_DONE): S.SETUP_CHECK,          # HOMING -> SETUP_CHECK
+
     (S.SETUP_CHECK, T.START): S.WAIT_HUMAN,            # -> WAIT_HUMAN, ENGINE_THINK or PLAN (branches below)
     (S.WAIT_HUMAN, T.HUMAN_MOVE): S.COMMIT_HUMAN,      # WAIT_HUMAN -> COMMIT_HUMAN
     (S.COMMIT_HUMAN, T.COMMIT_DONE): S.ENGINE_THINK,   # -> ENGINE_THINK or GAME_OVER
@@ -53,7 +54,7 @@ SPEC_TABLE: dict[tuple[State, Trigger], State | None] = {
     (S.VERIFY, T.VERIFY_OK): S.WAIT_HUMAN,             # -> WAIT_HUMAN, GAME_OVER or ERROR_RECOVER
     (S.VERIFY, T.VERIFY_FAILED): S.ERROR_RECOVER,
     (S.PAUSED, T.RESUME): S.WAIT_HUMAN,                # PAUSED -> the step that would have followed (branches below)
-    (S.ERROR_RECOVER, T.RESYNC): S.PLAN,               # -> WAIT_HUMAN, PLAN, HOMING or GAME_OVER (branches below)
+    (S.ERROR_RECOVER, T.RESYNC): S.PLAN,               # -> WAIT_HUMAN, PLAN, ENGINE_THINK, HOMING or GAME_OVER (below)
     (S.ERROR_RECOVER, T.ALARM): S.ERROR_RECOVER,       # already in error: stays, homing may become mandatory
     (S.GAME_OVER, T.NEW_GAME): S.SETUP_CHECK,          # GAME_OVER -> INIT or SETUP_CHECK
     (S.GAME_OVER, T.RESTART): S.INIT,
@@ -133,7 +134,7 @@ def test_every_state_change_the_fsm_can_make_is_in_the_spec_table() -> None:
         (S.COMMIT_HUMAN, T.COMMIT_DONE): {S.ENGINE_THINK, S.GAME_OVER},
         (S.ROBOT_EXEC, T.EXEC_DONE): {S.VERIFY},
         (S.VERIFY, T.VERIFY_OK): {S.WAIT_HUMAN, S.GAME_OVER, S.PAUSED},  # PAUSED: pause requested earlier (7.3)
-        (S.ERROR_RECOVER, T.RESYNC): {S.WAIT_HUMAN, S.PLAN, S.HOMING, S.GAME_OVER},
+        (S.ERROR_RECOVER, T.RESYNC): {S.WAIT_HUMAN, S.PLAN, S.ENGINE_THINK, S.HOMING, S.GAME_OVER},
         (S.PAUSED, T.RESUME): {S.WAIT_HUMAN, S.PLAN, S.ROBOT_EXEC},
         (S.ENGINE_THINK, T.ENGINE_MOVE_READY): {S.PLAN, S.PAUSED},
         (S.PLAN, T.PLAN_READY): {S.ROBOT_EXEC, S.PAUSED},
@@ -247,6 +248,30 @@ def test_game_over_leads_to_a_new_game_or_a_full_restart(tmp_path: Path) -> None
     assert rig.state is S.INIT
 
 
+def test_a_normal_startup_goes_init_calibrate_homing_setup_check(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    path = [rig.state]
+    for trigger in (T.YOLO_ON, T.INIT_DONE, T.CALIBRATE_DONE, T.HOMING_DONE):
+        rig.do(trigger)
+        path.append(rig.state)
+    assert path == [S.IDLE, S.INIT, S.CALIBRATE, S.HOMING, S.SETUP_CHECK]
+    assert not rig.fsm.homing_required
+
+
+def test_setup_check_is_entered_only_after_homing_or_for_a_new_game() -> None:
+    """Calibration alone never reaches SETUP_CHECK: homing is mandatory at every startup."""
+    entering = {(s, t) for (s, t), targets in TRANSITIONS.items() if S.SETUP_CHECK in targets}
+    assert entering == {(S.HOMING, T.HOMING_DONE), (S.GAME_OVER, T.NEW_GAME)}
+    assert set(TRANSITIONS[(S.CALIBRATE, T.CALIBRATE_DONE)]) == {S.HOMING, S.IDLE}  # IDLE: a deferred YOLO off
+
+
+def test_the_arm_may_move_in_the_startup_homing_but_a_game_cannot_start_yet(tmp_path: Path) -> None:
+    rig = Rig(tmp_path).reach(S.HOMING)
+    assert rig.fsm.arm_may_move and not rig.fsm.move_detector_enabled
+    assert not rig.fsm.can_accept(T.START, human_color=chess.WHITE)  # Start waits for SETUP_CHECK
+    assert not Rig(tmp_path / "calibrating").reach(S.CALIBRATE).fsm.can_accept(T.HOMING_DONE)  # homing must be entered first
+
+
 # --------------------------------------------------------------------------- #
 # The FSM decides: guards that depend on the game
 # --------------------------------------------------------------------------- #
@@ -287,7 +312,8 @@ def test_start_needs_a_side_and_a_game(tmp_path: Path) -> None:
     assert not rig.fsm.handle(T.START, human_color=chess.WHITE, pending="skip").accepted
     assert not rig.fsm.handle(T.START, human_color=chess.WHITE, pending="redo").accepted  # nothing to redo
     bare = Fsm()
-    bare.handle(T.YOLO_ON), bare.handle(T.INIT_DONE), bare.handle(T.CALIBRATE_DONE)
+    bare.handle(T.YOLO_ON), bare.handle(T.INIT_DONE), bare.handle(T.CALIBRATE_DONE), bare.handle(T.HOMING_DONE)
+    assert bare.state is S.SETUP_CHECK
     assert not bare.handle(T.START, human_color=chess.WHITE).accepted  # no GameState attached
 
 
@@ -564,8 +590,8 @@ def test_error_recover_is_entered_from_every_running_state_and_from_nowhere_else
     assert S.IDLE not in entering and S.GAME_OVER not in entering
 
 
-def test_error_recover_leaves_only_to_wait_human_plan_homing_or_game_over() -> None:
-    assert set(TRANSITIONS[(S.ERROR_RECOVER, T.RESYNC)]) == {S.WAIT_HUMAN, S.PLAN, S.HOMING, S.GAME_OVER}
+def test_error_recover_leaves_only_to_wait_human_plan_engine_think_homing_or_game_over() -> None:
+    assert set(TRANSITIONS[(S.ERROR_RECOVER, T.RESYNC)]) == {S.WAIT_HUMAN, S.PLAN, S.ENGINE_THINK, S.HOMING, S.GAME_OVER}
     exits = {t for (s, t) in TRANSITIONS if s is S.ERROR_RECOVER}
     assert exits == {T.RESYNC, T.ALARM, T.YOLO_OFF}  # RESYNC leaves; ALARM stays; YOLO off is 7.3
 
@@ -624,16 +650,20 @@ def test_engine_failure_or_timeout_leads_to_error_recover_without_a_pending_move
     assert not rig.fsm.homing_required  # the arm never moved
 
 
-def test_after_an_engine_failure_the_engine_is_asked_again_through_homing_and_setup_check(tmp_path: Path) -> None:
-    """The table has no exit from ERROR_RECOVER to ENGINE_THINK, so the retry goes HOMING -> SETUP_CHECK -> Start."""
+def test_after_an_engine_failure_resync_asks_the_engine_again_without_homing(tmp_path: Path) -> None:
+    """It is the engine's turn, no move is pending and homing is not required: ERROR_RECOVER -> ENGINE_THINK."""
     rig = Rig(tmp_path).reach(S.ENGINE_THINK, ready=False)
     rig.do(T.ENGINE_FAILED)
+    assert rig.state is S.ERROR_RECOVER and not rig.fsm.homing_required and rig.game.pending_move is None
+    before = (rig.game.fen(), rig.game.history, rig.game.pending_move)
     rig.do(T.RESYNC)
-    assert rig.state is S.HOMING
-    rig.do(T.HOMING_DONE)
-    assert rig.state is S.SETUP_CHECK
-    rig.do(T.START, human_color=chess.WHITE)
     assert rig.state is S.ENGINE_THINK
+    assert (rig.game.fen(), rig.game.history, rig.game.pending_move) == before  # the FSM never touches the game
+    assert rig.fsm.compute_only and not rig.fsm.arm_may_move and not rig.fsm.move_detector_enabled
+    # the second attempt succeeds and the game carries on to the robot as usual
+    rig.game.set_pending_move(E7E5)
+    rig.do(T.ENGINE_MOVE_READY)
+    assert rig.state is S.PLAN
 
 
 def test_a_plan_failure_leads_to_error_recover_and_keeps_the_pending_move(tmp_path: Path) -> None:
@@ -691,14 +721,12 @@ def test_resync_with_an_uncommitted_human_move_goes_back_to_wait_human(tmp_path:
     assert rig.state is S.WAIT_HUMAN and len(rig.game.history) == 0
 
 
-def test_resync_after_the_human_move_was_committed_asks_the_engine_again_through_homing(tmp_path: Path) -> None:
+def test_resync_after_the_human_move_was_committed_asks_the_engine_directly(tmp_path: Path) -> None:
     rig = Rig(tmp_path).reach(S.COMMIT_HUMAN)  # committed, COMMIT_DONE not yet reported
     rig.do(T.ALARM, alarm="CAMERA_LOST")
+    assert not rig.fsm.homing_required
     rig.do(T.RESYNC)
-    assert rig.state is S.HOMING  # engine's turn, nothing stored: no exit to ENGINE_THINK in the table
-    rig.do(T.HOMING_DONE)
-    rig.do(T.START, human_color=chess.WHITE)
-    assert rig.state is S.ENGINE_THINK
+    assert rig.state is S.ENGINE_THINK  # engine's turn, nothing stored, no homing needed
 
 
 @pytest.mark.parametrize("state", [S.INIT, S.CALIBRATE, S.SETUP_CHECK, S.HOMING], ids=lambda s: s.value)
@@ -740,6 +768,77 @@ def test_a_pending_move_wins_over_the_humans_turn_in_resync(tmp_path: Path) -> N
     rig.do(T.ALARM, alarm="CAMERA_LOST")
     rig.do(T.RESYNC)
     assert rig.state is S.PLAN and rig.game.pending_move == E7E5
+
+
+def _recovering_with_homing_required(path: Path) -> Rig:
+    rig = Rig(path).reach(S.WAIT_HUMAN)
+    rig.do(T.ALARM, alarm="ESTOP")
+    return rig
+
+
+def _recovering_after_the_game_ended(path: Path) -> Rig:
+    rig = Rig(path, fen=MATE_IN_ONE_FEN, human=chess.BLACK).reach(S.COMMIT_HUMAN)  # the human mated
+    rig.do(T.ALARM, alarm="CAMERA_LOST")
+    return rig
+
+
+def _recovering_with_a_pending_move(path: Path) -> Rig:
+    rig = Rig(path).reach(S.PLAN)
+    rig.do(T.ALARM, alarm="CAMERA_LOST")
+    return rig
+
+
+def _recovering_on_the_humans_turn(path: Path) -> Rig:
+    rig = Rig(path).reach(S.WAIT_HUMAN)
+    rig.do(T.ALARM, alarm="CAMERA_LOST")
+    return rig
+
+
+def _recovering_on_the_engines_turn_with_no_pending_move(path: Path) -> Rig:
+    rig = Rig(path).reach(S.ENGINE_THINK, ready=False)
+    rig.do(T.ENGINE_FAILED)
+    return rig
+
+
+RESYNC_EXITS = [  # SPEC 7.2, in the order the rule lists them
+    pytest.param(_recovering_with_homing_required, S.HOMING, id="homing_required"),
+    pytest.param(_recovering_after_the_game_ended, S.GAME_OVER, id="game_over"),
+    pytest.param(_recovering_with_a_pending_move, S.PLAN, id="pending_move"),
+    pytest.param(_recovering_on_the_engines_turn_with_no_pending_move, S.ENGINE_THINK, id="engines_turn_no_pending"),
+    pytest.param(_recovering_on_the_humans_turn, S.WAIT_HUMAN, id="humans_turn"),
+]
+
+
+@pytest.mark.parametrize(("build", "expected"), RESYNC_EXITS)
+def test_resync_exit_is_chosen_from_game_state_alone(tmp_path: Path, build, expected: State) -> None:  # type: ignore[no-untyped-def]
+    rig = build(tmp_path)
+    assert rig.state is S.ERROR_RECOVER
+    before = (rig.game.fen(), rig.game.history, rig.game.pending_move)
+    rig.do(T.RESYNC)
+    assert rig.state is expected
+    assert (rig.game.fen(), rig.game.history, rig.game.pending_move) == before  # decided by reading, never by writing
+
+
+def test_every_resync_exit_of_the_spec_rule_is_reachable() -> None:
+    assert {expected for _build, expected in (p.values for p in RESYNC_EXITS)} == set(TRANSITIONS[(S.ERROR_RECOVER, T.RESYNC)])
+
+
+def test_homing_still_comes_first_when_an_alarm_hits_while_recovering_from_an_engine_failure(tmp_path: Path) -> None:
+    rig = _recovering_on_the_engines_turn_with_no_pending_move(tmp_path)
+    rig.do(T.ALARM, alarm="HB_TIMEOUT")  # accepted while recovering: homing becomes mandatory
+    rig.do(T.RESYNC)
+    assert rig.state is S.HOMING
+    rig.do(T.HOMING_DONE)
+    rig.do(T.START, human_color=chess.WHITE)
+    assert rig.state is S.ENGINE_THINK  # after homing the engine is asked through SETUP_CHECK
+
+
+def test_an_alarm_that_needs_no_homing_does_not_divert_the_engine_retry(tmp_path: Path) -> None:
+    rig = _recovering_on_the_engines_turn_with_no_pending_move(tmp_path)
+    rig.do(T.ALARM, alarm="CAMERA_LOST")
+    assert rig.state is S.ERROR_RECOVER and not rig.fsm.homing_required
+    rig.do(T.RESYNC)
+    assert rig.state is S.ENGINE_THINK
 
 
 # ----- PAUSED resumes at the step that would have followed -----
