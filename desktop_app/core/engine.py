@@ -7,6 +7,10 @@
   restarts :class:`EngineUnavailableError` is raised.
 * The five modes and the engine path come from ``config/difficulty_levels.json``. A new mode
   takes effect from the next engine move (options are applied lazily, right before a query).
+* The engine path can be overridden without editing a tracked file. Precedence, highest first:
+  the ``STOCKFISH_PATH`` environment variable (blank counts as unset), then the optional,
+  git-ignored ``config/local.json`` (``{"stockfish_path": "..."}``), then ``engine.path`` in
+  ``difficulty_levels.json``. ``EngineConfig.path_source`` says which one won.
 * The UCI process sits behind the small :class:`UciBackend` protocol, so tests use a fake engine
   and never need the Stockfish binary.
 
@@ -18,8 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Optional, Protocol, Union
@@ -33,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "difficulty_levels.json"
+DEFAULT_LOCAL_CONFIG_PATH = REPO_ROOT / "config" / "local.json"  # optional, never tracked by git
+STOCKFISH_PATH_ENV = "STOCKFISH_PATH"
+LOCAL_CONFIG_KEYS = frozenset({"stockfish_path"})
 
 MODE_KEYS = ("beginner", "amateur", "player", "master", "grandmaster")
 
@@ -80,6 +89,14 @@ class DifficultyMode:
     max_depth: Optional[int]
 
 
+class PathSource(str, Enum):
+    """Where ``EngineConfig.path`` came from (highest precedence first)."""
+
+    ENVIRONMENT = "environment"  # the STOCKFISH_PATH variable
+    LOCAL_FILE = "local_file"  # config/local.json
+    DIFFICULTY_FILE = "difficulty_file"  # engine.path in difficulty_levels.json
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     path: str
@@ -88,6 +105,7 @@ class EngineConfig:
     default_options: Mapping[str, OptionValue]
     default_mode: str
     modes: Mapping[str, DifficultyMode]
+    path_source: PathSource = PathSource.DIFFICULTY_FILE
 
 
 def _is_number(value: object) -> bool:
@@ -103,8 +121,69 @@ def _options(name: str, raw: object) -> Mapping[str, OptionValue]:
     return MappingProxyType(dict(raw))
 
 
-def load_engine_config(path: Optional[Path] = None) -> EngineConfig:
-    """Load and validate config/difficulty_levels.json (or ``path``)."""
+def _read_local_stockfish_path(path: Path) -> Optional[str]:
+    """The ``stockfish_path`` in the local override file, or None when it overrides nothing.
+
+    A missing file or an empty object overrides nothing. A file that exists but is broken is an
+    error, never silently ignored: the operator wrote it to change the engine and would otherwise
+    be running a different binary than they think.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise EngineConfigError(f"cannot read {path}: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise EngineConfigError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise EngineConfigError(f"{path}: top level must be an object")
+    if unknown := sorted(set(data) - LOCAL_CONFIG_KEYS):
+        raise EngineConfigError(f"{path}: unknown key(s) {unknown}; allowed: {sorted(LOCAL_CONFIG_KEYS)}")
+    if "stockfish_path" not in data:
+        return None
+    value = data["stockfish_path"]
+    if not isinstance(value, str) or not value.strip():
+        raise EngineConfigError(f"{path}: stockfish_path must be a non-empty string, got {value!r}")
+    return value.strip()
+
+
+def resolve_engine_path(
+    default_path: str,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+    local_config_path: Optional[Path] = None,
+) -> tuple[str, PathSource]:
+    """Pick the Stockfish path: STOCKFISH_PATH, then config/local.json, then ``default_path``.
+
+    The local file is read only when the environment variable does not decide. A blank
+    ``STOCKFISH_PATH`` counts as unset (a shell that exports an empty variable is common).
+    """
+    env = os.environ if environ is None else environ
+    from_env = env.get(STOCKFISH_PATH_ENV, "").strip()
+    if from_env:
+        return from_env, PathSource.ENVIRONMENT
+    local_path = Path(local_config_path) if local_config_path is not None else DEFAULT_LOCAL_CONFIG_PATH
+    from_local = _read_local_stockfish_path(local_path)
+    if from_local is not None:
+        return from_local, PathSource.LOCAL_FILE
+    return default_path, PathSource.DIFFICULTY_FILE
+
+
+def load_engine_config(
+    path: Optional[Path] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+    local_config_path: Optional[Path] = None,
+) -> EngineConfig:
+    """Load and validate config/difficulty_levels.json (or ``path``).
+
+    The engine path may be overridden by ``STOCKFISH_PATH`` or ``config/local.json`` (see
+    :func:`resolve_engine_path`). ``environ`` and ``local_config_path`` exist so tests and
+    callers do not depend on the real environment or on a file in the repository.
+    """
     source = Path(path) if path is not None else DEFAULT_CONFIG_PATH
     try:
         data = json.loads(source.read_text(encoding="utf-8"))
@@ -150,13 +229,19 @@ def load_engine_config(path: Optional[Path] = None) -> EngineConfig:
             think_time_s=float(think),
             max_depth=depth,
         )
+    resolved_path, path_source = resolve_engine_path(path_value, environ=environ, local_config_path=local_config_path)
+    if path_source is not PathSource.DIFFICULTY_FILE:
+        logger.info(
+            "Engine path %r comes from %s (it overrides %r from %s)", resolved_path, path_source.value, path_value, source.name
+        )
     return EngineConfig(
-        path=path_value,
+        path=resolved_path,
         answer_margin_s=float(margin),
         max_restarts=restarts,
         default_options=_options("default_options", data.get("default_options", {})),
         default_mode=default_mode,
         modes=MappingProxyType(modes),
+        path_source=path_source,
     )
 
 

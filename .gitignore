@@ -12,3 +12,6 @@ data/models/yolo/*
 data/calibration/*
 !data/calibration/.gitkeep
 *.log
+
+# Per-machine overrides (for example the Stockfish path); copy config/local.example.json
+config/local.json
