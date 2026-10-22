@@ -240,7 +240,7 @@ Rules clarified in phase 2:
 - A promoted pawn goes to the next free capture slot.
 - A draw by threefold repetition or the 50-move rule ends the game only once it has actually occurred.
 - The engine answer timeout is 5 s and the default mode is amateur.
-- The Robot Commander refuses to send a pick-and-place chain through a real serial port while any grasp profile or reserve slot is still a placeholder, unless the operator explicitly enables a no-load bench mode, which logs a loud warning and never runs a full pick-and-place chain.
+- The Robot Commander refuses to send a pick-and-place chain through a real serial port while any grasp profile, reserve slot or the capture/reserve/park layout is still a placeholder, unless the operator explicitly enables a no-load bench mode, which logs a loud warning and never runs a full pick-and-place chain.
 - ERROR_RECOVER exits only through Resync, and the exit is chosen from GameState alone: homing required → HOMING; game over → GAME_OVER; a pending move exists → PLAN; it is the engine's turn with no pending move (for example after an engine failure) → ENGINE_THINK; it is the human's turn → WAIT_HUMAN; otherwise → HOMING.
 - An alarm that arrives while already in ERROR_RECOVER is accepted, keeps the state and only makes homing mandatory.
 - Camera loss before a game is running (INIT, CALIBRATE, SETUP_CHECK) resyncs through HOMING without re-running INIT.
