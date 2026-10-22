@@ -8,21 +8,21 @@ English build spec for AI coding agents (Claude, Cursor, etc.) and the human ope
 - Work phase by phase (section 12). Give the AI one phase plus the sections it needs, never the whole system at once.
 - Every phase has a definition of done. Do not start the next phase until it is met.
 - Touch real hardware only from phase 4. Before that, use the ESP32 simulator (phase 3).
-- Any value marked \[TO CONFIRM\] (section 13) must live in a config file and be asked about, never guessed.
+- Any value marked [TO CONFIRM] (section 13) must live in a config file and be asked about, never guessed.
 
 ## 2. Invariant rules for the AI
 
 1. **Single source of truth for the game:** only GameState (wrapping python-chess) may change the position. Camera results are accepted only when they match a legal move, and never overwrite the position.
 2. **core/ never imports gui/.** The GUI only listens to Event Bus events and sends requests back through the Event Bus. The FSM decides whether to accept a request.
 3. **Separate game state (GameState) from operating phase (FSM).**
-4. **Move Detector runs only in WAIT\_HUMAN.** The robot arm must never be mistaken for a human hand.
+4. **Move Detector runs only in WAIT_HUMAN.** The robot arm must never be mistaken for a human hand.
 5. **PC computes, ESP32 does real time and safety.** Never put safety logic only on the PC.
-6. **Protocol is declared once:** config/protocol\_commands.py (PC) and include/protocol.h (firmware), with a test that cross-checks both.
+6. **Protocol is declared once:** config/protocol_commands.py (PC) and include/protocol.h (firmware), with a test that cross-checks both.
 7. **No hard-coded hardware constants.** Everything lives in config/hardware.yaml (PC) and include/pins.h, include/config.h (firmware).
 8. **Every dangerous action has a timeout and a stop path:** Z has a timeout, Serial has a heartbeat, ESTOP is always available.
 9. **Every module has tests** (pytest on the PC; pure-logic tests on firmware where possible). A feature is not done without tests.
 10. **Code style:** type hints, leveled logging (no print), English identifiers and comments.
-11. **Language policy:** all user-visible GUI text is Vietnamese and lives only in desktop\_app/gui/strings\_vi.py. Internal enums, state names, alarm codes, config keys, logs and protocol stay English. Never put Vietnamese in core/, hardware/, kinematics/ or vision/.
+11. **Language policy:** all user-visible GUI text is Vietnamese and lives only in desktop_app/gui/strings_vi.py. Internal enums, state names, alarm codes, config keys, logs and protocol stay English. Never put Vietnamese in core/, hardware/, kinematics/ or vision/.
 
 ## 3. Repository layout
 
@@ -80,7 +80,7 @@ chess-robot/
 | border | Board border | 26 mm |
 | h | Z travel | 70 mm |
 | f | TB6600 microstepping | 16 (SW1 OFF, SW2 OFF, SW3 ON) |
-| i | Gear ratio, motor to driving link | \[TO CONFIRM\], default 1 |
+| i | Gear ratio, motor to driving link | 1 (direct drive, confirmed) |
 | pulses/rev | 200 × f × i | 3200 when i = 1 |
 | θ | Joint angle resolution | 0.1125° when i = 1 |
 
@@ -91,11 +91,11 @@ chess-robot/
 | Pin | Connected to | Note |
 | --- | --- | --- |
 | D13 | TB6600 #1 ENA- | joint 1 (α) |
-| D14 | TB6600 #1 DIR- |  |
-| D27 | TB6600 #1 PUL- |  |
+| D14 | TB6600 #1 DIR- | |
+| D27 | TB6600 #1 PUL- | |
 | D26 | TB6600 #2 ENA- | joint 2 (β) |
-| D25 | TB6600 #2 DIR- |  |
-| D33 | TB6600 #2 PUL- |  |
+| D25 | TB6600 #2 DIR- | |
+| D33 | TB6600 #2 PUL- | |
 | D4 | L298 ENA | Z motor PWM, about 10 kHz |
 | D18 | L298 IN1 | raise direction |
 | D19 | L298 IN2 | lower direction |
@@ -108,24 +108,24 @@ chess-robot/
 
 - **TB6600:** common-anode wiring. The three (+) inputs go to 3V3 and the three (−) inputs go to GPIOs; a LOW GPIO makes the opto conduct. **Active ENA means driver OFF:** GPIO HIGH or floating = driver enabled; GPIO LOW = driver disabled. Therefore `setEnablePin(pin, false)`, `setAutoEnable(false)`, and DISABLE pulls the GPIO LOW. Configure these pins at the very start of setup().
 - **Limit switches (NC):** COM to 3V3, NC to the signal pin, 10 kΩ pull-down. Normally HIGH; actuated or wire broken = LOW (fail-safe). Debounce 5–10 ms in firmware.
-- **AS5600 (analog, full range 0–100% of Vdd, default OUTS = 00, not programmed):** ADS1115 A0 = AS5600 #2 (β), A1 = AS5600 #1 (α), A2 = Vdd, PGA ±4.096 V. Compute `r = V_OUT / V_A2` and sensor angle `θ = k·r·360° + b`. k and b are per sensor and stored in data/calibration/encoder\_calibration.json. If `r < 0.02` or `r > 0.98`, raise `!alarm:SENSOR_FAULT`. System error is about ±1°, so use it only for lost-step detection and homing.
+- **AS5600 (analog, full range 0–100% of Vdd, default OUTS = 00, not programmed):** ADS1115 A0 = AS5600 #2 (β), A1 = AS5600 #1 (α), A2 = Vdd, PGA ±4.096 V. Compute `r = V_OUT / V_A2` and sensor angle `θ = k·r·360° + b`. k and b are per sensor and stored in data/calibration/encoder_calibration.json. If `r < 0.02` or `r > 0.98`, raise `!alarm:SENSOR_FAULT`. System error is about ±1°, so use it only for lost-step detection and homing.
 - **Z axis:** DC motor through L298, IN1 = raise, IN2 = lower. Only two positions: TOP (limit #1, homing reference) and BOTTOM (limit #2). A limit switch stops the motor inside the interrupt. Timeout per move is about 1.5 × the full-travel time.
 - **SG90 servo:** pulse 500–2500 µs for 0–180°, separate 5 V supply, common GND with the ESP32.
 
 ## 5. Serial protocol
 
-Line-based text, G-code style, each command ends with a newline. Format: `NAME KEY=value ...`, for example `MOVE A=135.4 B=44.6 F=60`. Angles in degrees, lengths in mm, decimal point is a dot. Baud rate \[TO CONFIRM\], suggested 115200.
+Line-based text, G-code style, each command ends with a newline. Format: `NAME KEY=value ...`, for example `MOVE A=135.4 B=44.6 F=60`. Angles in degrees, lengths in mm, decimal point is a dot. Baud rate [TO CONFIRM], suggested 115200.
 
 ### 5.1 Commands
 
 | Command | Function | Response |
 | --- | --- | --- |
-| HOME \[Z\] \[AB\] | Homing. No argument: Z first (raise until limit #1), then the two joints using AS5600 | ok, then done |
-| MOVE A=<α> B=<β> F=\<speed> | Move both joints to target angles. No Z parameter | ok when queued; error:4 if not homed or Z not at TOP; error:2 if out of limits |
+| HOME [Z] [AB] | Homing. No argument: Z first (raise until limit #1), then the two joints using AS5600 | ok, then done |
+| MOVE A=<α> B=<β> F=<speed> | Move both joints to target angles. No Z parameter | ok when queued; error:4 if not homed or Z not at TOP; error:2 if out of limits |
 | ZUP | Raise Z until limit #1 triggers | ok, then done |
 | ZDOWN | Lower Z until limit #2 triggers | ok, then done |
 | ZSTOP | Stop and brake Z immediately | ok |
-| ACCEL S=\<deg/s²> | Acceleration for following segments | ok |
+| ACCEL S=<deg/s²> | Acceleration for following segments | ok |
 | GRIP S=<0–180> | Gripper servo angle | ok |
 | ENABLE / DISABLE | Enable / disable both TB6600 drivers | ok |
 | WAIT | Wait for the motion queue to drain | ok, then done |
@@ -146,7 +146,7 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 
 - Keep only a few unacknowledged commands in flight so the ESP32 queue always has work without overflowing.
 - Send PING periodically. If the ESP32 misses heartbeats beyond the threshold it stops safely (section 10).
-- After ESTOP, lost steps, HB\_TIMEOUT or SENSOR\_FAULT, homing is mandatory.
+- After ESTOP, lost steps, HB_TIMEOUT or SENSOR_FAULT, homing is mandatory.
 
 ## 6. Kinematics and trajectory
 
@@ -182,7 +182,7 @@ Steps:   N = 200·f·i·(angle − angle0) / 360
 | A8 | −108.5; 408.5 | 124.6° | 96.5° |
 | H8 | 108.5; 408.5 | 83.5° | 55.4° |
 
-- Over the 64 squares: α spans 83.5° to 184.3°; β spans −4.3° to 96.5°; the smallest μ is about 26° (squares A8, H8); the Jacobian condition number is between 1.03 and 2.79. Tests must confirm these numbers.
+- Over the 64 squares: α spans 83.5° to 184.3°; β spans −4.3° to 96.5°; the smallest μ is about 26° (squares A8, H8); the Jacobian condition number runs from 1.033 to 2.793 (tests allow ±0.005). Tests must confirm these numbers.
 
 ### 6.3 Trajectory
 
@@ -192,13 +192,13 @@ Steps:   N = 200·f·i·(angle − angle0) / 360
 
 ### 6.4 Pick-and-place sequence
 
-`MOVE` above the source square (Z at TOP) → `ZDOWN` → `GRIP` close using the piece's grasp angle (config/grasp\_profiles.json) → `ZUP` → `MOVE` above the target square → `ZDOWN` → `GRIP` open → `ZUP`.
+`MOVE` above the source square (Z at TOP) → `ZDOWN` → `GRIP` close using the piece's grasp angle (config/grasp_profiles.json) → `ZUP` → `MOVE` above the target square → `ZDOWN` → `GRIP` open → `ZUP`.
 
 - **Capture:** remove the captured piece to the capture zone (off the board) first, then move the capturing piece.
 - **En passant:** the captured pawn is on a different square than the target; remove it to the capture zone, then move.
 - **Castling:** move the king first, then the rook.
 - **Promotion:** move the pawn off the board, take the new piece from the reserve zone and place it on the promotion square.
-- Capture zone, reserve zone and park position (outside the camera view) are defined in dimension.py and pass the same workspace and μ ≥ 15° checks. \[TO CONFIRM: coordinates\]
+- The capture zone (15 slots), reserve zone (4 slots) and park position (1 point) are defined in dimension.py as lists of slots. Each slot must be off the board (the border counts as board), inside the workspace and have μ ≥ 15°. Proposed values, to be confirmed on the real board: capture slots at x in {−190, −225, −260} and y in {160, 195, 230, 265, 300}; reserve slots at x in {190, 225} and y in {200, 235}; park at (0, 120), which must be outside the camera view. [TO CONFIRM: slot pitch against the piece base diameter, park position against the camera view]
 
 ## 7. GameState and FSM
 
@@ -208,10 +208,10 @@ Wraps `chess.Board`; the only place allowed to change the position.
 
 - `commit_move(move, source)`: validates, updates, records history, emits `game_updated`. `source` is `human` or `engine`.
 - `preview_move(move)`: returns a copy of the board after a trial move without changing the real position; used to compute the expected position for VERIFY.
-- `pending_move`: the engine move, saved together with `current.fen` to data/games/pending.json from ENGINE\_THINK until VERIFY succeeds; only then `commit_move(source=engine)`. If the app starts and finds a pending\_move, it enters SETUP\_CHECK, compares the camera with the position before and after that move, then redoes or cancels it.
+- `pending_move`: the engine move, saved together with `current.fen` to data/games/pending.json from ENGINE_THINK until VERIFY succeeds; only then `commit_move(source=engine)`. If the app starts and finds a pending_move, it enters SETUP_CHECK, compares the camera with the position before and after that move, then redoes or cancels it.
 - Provides FEN to Stockfish and `legal_moves` to the Move Detector.
 - Saves `current.fen` and PGN after every commit so a game can be reloaded after an abrupt shutdown.
-- Detects game end (checkmate, draw, no legal moves) and moves the FSM to GAME\_OVER.
+- Detects game end (checkmate, draw, no legal moves) and moves the FSM to GAME_OVER.
 
 ### 7.2 State table
 
@@ -219,19 +219,19 @@ Wraps `chess.Board`; the only place allowed to change the position.
 | --- | --- | --- |
 | IDLE | Program off (YOLO off): camera preview only, ESP32 still connected, heartbeat still sent, drivers still enabled | INIT when YOLO is switched on |
 | INIT | Connect ESP32, camera, engine; load YOLO model; load config and calibration; check pending.json | CALIBRATE |
-| CALIBRATE / HOMING | Check camera calibration; home Z, then both joints | SETUP\_CHECK |
-| SETUP\_CHECK | Camera confirms the required position; user picks side and mode, presses Start | WAIT\_HUMAN, ENGINE\_THINK, or PLAN (redo pending\_move) |
-| WAIT\_HUMAN | Enable Move Detector; wait for a stable legal move (or manual confirm) | COMMIT\_HUMAN |
-| COMMIT\_HUMAN | `commit_move(human)`; check game end | ENGINE\_THINK or GAME\_OVER |
-| ENGINE\_THINK | Ask Stockfish, store `pending_move` (not committed) | PLAN, or ERROR\_RECOVER if the engine fails or times out |
-| PLAN | Move Planner builds the command chain (capture, castling, promotion...) | ROBOT\_EXEC, or ERROR\_RECOVER if a point is invalid or no capture or reserve slot is free |
-| ROBOT\_EXEC | Send commands, wait for ok and done; Move Detector locked | VERIFY or ERROR\_RECOVER |
-| VERIFY | Robot to park position, capture image, YOLO compares piece types per square with the expected position; match → `commit_move(engine)`, update CorrectionMap | WAIT\_HUMAN, GAME\_OVER or ERROR\_RECOVER |
+| CALIBRATE, then HOMING | CALIBRATE: check camera calibration. HOMING: home Z, then both joints. Mandatory at every startup, because the firmware rejects MOVE (error:4) until homed | CALIBRATE → HOMING → SETUP_CHECK |
+| SETUP_CHECK | Camera confirms the required position; user picks side and mode, presses Start | WAIT_HUMAN, ENGINE_THINK, or PLAN (redo pending_move) |
+| WAIT_HUMAN | Enable Move Detector; wait for a stable legal move (or manual confirm) | COMMIT_HUMAN |
+| COMMIT_HUMAN | `commit_move(human)`; check game end | ENGINE_THINK or GAME_OVER |
+| ENGINE_THINK | Ask Stockfish, store `pending_move` (not committed) | PLAN, or ERROR_RECOVER if the engine fails or times out |
+| PLAN | Move Planner builds the command chain (capture, castling, promotion...) | ROBOT_EXEC, or ERROR_RECOVER if a point is invalid or no capture or reserve slot is free |
+| ROBOT_EXEC | Send commands, wait for ok and done; Move Detector locked | VERIFY or ERROR_RECOVER |
+| VERIFY | Robot to park position, capture image, YOLO compares piece types per square with the expected position; match → `commit_move(engine)`, update CorrectionMap | WAIT_HUMAN, GAME_OVER or ERROR_RECOVER |
 | PAUSED | Keep GameState, Move Detector locked, robot at park position | The step that would have followed |
-| ERROR\_RECOVER | Entered from any running state on ESTOP, HB\_TIMEOUT, SENSOR\_FAULT, camera loss or a planning failure. Report error, highlight suspect squares, wait for Resync. After ESTOP, lost steps, HB\_TIMEOUT or SENSOR\_FAULT, homing is mandatory; keep pending\_move | WAIT\_HUMAN, PLAN, HOMING or GAME\_OVER |
-| GAME\_OVER | Show result, save PGN | INIT or SETUP\_CHECK |
+| ERROR_RECOVER | Entered from any running state on ESTOP, HB_TIMEOUT, SENSOR_FAULT, camera loss or a planning failure. Report error, highlight suspect squares, wait for Resync. After ESTOP, lost steps, HB_TIMEOUT or SENSOR_FAULT, homing is mandatory; keep pending_move | WAIT_HUMAN, PLAN, ENGINE_THINK, HOMING or GAME_OVER |
+| GAME_OVER | Show result, save PGN | INIT or SETUP_CHECK |
 
-The arm moves only in HOMING, ROBOT\_EXEC and VERIFY (return to the park position); ENGINE\_THINK and PLAN only compute. Move detection is locked in every state except WAIT\_HUMAN.
+The arm moves only in HOMING, ROBOT_EXEC and VERIFY (return to the park position); ENGINE_THINK and PLAN only compute. Move detection is locked in every state except WAIT_HUMAN.
 
 Rules clarified in phase 2:
 
@@ -240,19 +240,24 @@ Rules clarified in phase 2:
 - A promoted pawn goes to the next free capture slot.
 - A draw by threefold repetition or the 50-move rule ends the game only once it has actually occurred.
 - The engine answer timeout is 5 s and the default mode is amateur.
-- The Robot Commander refuses to use a real serial port while any grasp profile or reserve slot is still a placeholder.
+- The Robot Commander refuses to send a pick-and-place chain through a real serial port while any grasp profile or reserve slot is still a placeholder, unless the operator explicitly enables a no-load bench mode, which logs a loud warning and never runs a full pick-and-place chain.
+- ERROR_RECOVER exits only through Resync, and the exit is chosen from GameState alone: homing required → HOMING; game over → GAME_OVER; a pending move exists → PLAN; it is the engine's turn with no pending move (for example after an engine failure) → ENGINE_THINK; it is the human's turn → WAIT_HUMAN; otherwise → HOMING.
+- An alarm that arrives while already in ERROR_RECOVER is accepted, keeps the state and only makes homing mandatory.
+- Camera loss before a game is running (INIT, CALIBRATE, SETUP_CHECK) resyncs through HOMING without re-running INIT.
+- A normal startup goes INIT → CALIBRATE → HOMING → SETUP_CHECK.
+- The capture, reserve and park layout also carries an is_placeholder flag until it is confirmed on the real board.
 
 ### 7.3 Pause and YOLO on/off rules
 
-- **Pause:** in WAIT\_HUMAN it takes effect immediately; in ENGINE\_THINK or PLAN wait for a proposed move, then stop before the robot moves; in ROBOT\_EXEC finish the pick-and-place and VERIFY before entering PAUSED, so no piece is left hanging. The only immediate stop is the Emergency Stop button.
-- **YOLO off (any phase):** finish the running robot chain, park the arm, raise Z, save FEN/PGN, then enter IDLE. If in the middle of ROBOT\_EXEC, keep pending\_move.
+- **Pause:** in WAIT_HUMAN it takes effect immediately; in ENGINE_THINK or PLAN wait for a proposed move, then stop before the robot moves; in ROBOT_EXEC finish the pick-and-place and VERIFY before entering PAUSED, so no piece is left hanging. The only immediate stop is the Emergency Stop button.
+- **YOLO off (any phase):** finish the running robot chain, park the arm, raise Z, save FEN/PGN, then enter IDLE. If in the middle of ROBOT_EXEC, keep pending_move.
 - **YOLO on:** enter INIT; if an unfinished game exists, ask whether to continue or start a new one. If the model cannot be loaded, warn and ask whether to run the OpenCV fallback.
 
 ## 8. Computer vision
 
 ### 8.1 Camera and calibration
 
-- **Camera Manager** runs in its own thread and always keeps the latest frame; other modules get frames through it. Lock exposure, white balance and focus. Detect lost frames and reopen. Store the camera by device name, not just index; the user confirms with a preview. Scan for cameras only in INIT, ERROR\_RECOVER, or when the dialog is open, never while the robot is running.
+- **Camera Manager** runs in its own thread and always keeps the latest frame; other modules get frames through it. Lock exposure, white balance and focus. Detect lost frames and reopen. Store the camera by device name, not just index; the user confirms with a preview. Scan for cameras only in INIT, ERROR_RECOVER, or when the dialog is open, never while the robot is running.
 - **Intrinsics:** checkerboard from at least 20 poses, saved to calibration.json.
 - **Homography:** four board corners, `cv2.warpPerspective`, 8×8 grid.
 - **Board-to-robot mapping:** touch four corners (or four reference squares) with the gripper to compute the transform from board squares to robot mm.
@@ -264,12 +269,12 @@ Rules clarified in phase 2:
 - **14 classes, in this exact order in classes.yaml:** 12 piece types (P, N, B, R, Q, K for each color), `hand`, `robot_gripper`. The last two support the veto mechanism.
 - **Square assignment:** take the bottom-center point of the bounding box (the piece's foot) and pass it through the homography. Do not use the box center, because tall pieces would shift into a neighboring square. If a square has several detections, keep the highest confidence.
 - **Training data:** about 1000–2000 images of the actual board, using the exact piece set, all 12 types, many positions, partial occlusion by hand and gripper, varying light. Auto-label by placing positions generated from FEN by python-chess and projecting back through the inverse homography. Fine-tune from COCO weights.
-- **Model loading:** choose from data/models/yolo/ or browse for a .pt/.onnx file. Verify classes.yaml has all 14 classes in order; on error keep the old model and report. Switch models only in IDLE, PAUSED or SETUP\_CHECK.
+- **Model loading:** choose from data/models/yolo/ or browse for a .pt/.onnx file. Verify classes.yaml has all 14 classes in order; on error keep the old model and report. Switch models only in IDLE, PAUSED or SETUP_CHECK.
 - **Evaluation:** by the rate of correctly recognized moves over many test games, not mAP alone.
 
 ### 8.3 Move Detector
 
-Uses the position as the signal; motion is only used to discard bad frames. Active only in WAIT\_HUMAN.
+Uses the position as the signal; motion is only used to discard bad frames. Active only in WAIT_HUMAN.
 
 1. Each frame: compute the expected grid for the current position (not yet moved) and for every legal move (about 20–40 hypotheses), and score matching squares (correct piece type and color) against the observed grid from YOLO. Low-confidence squares (occluded, piece lifted) are excluded from the score rather than counted as wrong.
 2. Acceptance: best score reaches a threshold (for example ≥ 62/64 over trusted squares); the squares that differ between the best hypothesis and the unmoved position (2–4 squares) must match exactly; the score beats the second-best hypothesis by a safety margin.
@@ -283,17 +288,17 @@ After homography, crop the center of each square (skip the border) and compare w
 
 ## 9. Chess engine
 
-Stockfish over UCI with python-chess. Always query with the FEN from GameState so nothing drifts if the engine process restarts. If the engine does not answer within the time limit, restart it and reload the FEN. Config lives in config/difficulty\_levels.json; a new mode takes effect from the next engine move. Internal keys are English; display names are Vietnamese (section 11).
+Stockfish over UCI with python-chess. Always query with the FEN from GameState so nothing drifts if the engine process restarts. If the engine does not answer within the time limit, restart it and reload the FEN. Config lives in config/difficulty_levels.json; a new mode takes effect from the next engine move. Internal keys are English; display names are Vietnamese (section 11).
 
 | # | Key | Display (Vietnamese) | Stockfish config | Think time |
 | --- | --- | --- | --- | --- |
 | 1 | beginner | Tập sự | Skill Level 0, depth ≤ 2 | 0.2 s |
-| 2 | amateur | Nghiệp dư | UCI\_LimitStrength on, UCI\_Elo ≈ 1400 | 0.5 s |
-| 3 | player | Kỳ thủ | UCI\_Elo ≈ 1800 | 1 s |
-| 4 | master | Đại sư | UCI\_Elo ≈ 2400 | 2 s |
+| 2 | amateur | Nghiệp dư | UCI_LimitStrength on, UCI_Elo ≈ 1400 | 0.5 s |
+| 3 | player | Kỳ thủ | UCI_Elo ≈ 1800 | 1 s |
+| 4 | master | Đại sư | UCI_Elo ≈ 2400 | 2 s |
 | 5 | grandmaster | Chiến thần | Limit off, full strength | 3 s |
 
-Values are starting points; tune with real players. In Stockfish 16 and later UCI\_Elo ranges from 1320 to 3190, so the beginner level must use Skill Level and depth.
+Values are starting points; tune with real players. In Stockfish 16 and later UCI_Elo ranges from 1320 to 3190, so the beginner level must use Skill Level and depth.
 
 ## 10. ESP32 firmware
 
@@ -303,10 +308,10 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 
 | Task | Responsibility |
 | --- | --- |
-| serial\_cmd | Read lines, parse commands, reply ok / error, push commands into the queue |
+| serial_cmd | Read lines, parse commands, reply ok / error, push commands into the queue |
 | motion | Take commands from the queue, generate joint pulses via FastAccelStepper, synchronize both joints to finish together |
 | zaxis | Raise/lower Z by PWM, timeout, state TOP / BOTTOM / MID |
-| sensors | Read ADS1115 (A0, A1, A2), average several samples, compute r and angle, detect SENSOR\_FAULT |
+| sensors | Read ADS1115 (A0, A1, A2), average several samples, compute r and angle, detect SENSOR_FAULT |
 | safety | Heartbeat watchdog, ESTOP flag, highest priority |
 
 ### 10.2 Mandatory requirements
@@ -316,7 +321,7 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 - **PWM:** LEDC for the Z motor (about 10 kHz) and the servo (50 Hz) use separate channels and timers that do not collide.
 - **Z axis:** ZUP runs until limit #1 triggers; ZDOWN runs until limit #2 triggers. A limit switch stops the motor inside the interrupt (PWM = 0, brake). Moderate PWM, ramped up, eased near the end of travel. On timeout stop and send `!alarm:Z_TIMEOUT`. `LIMIT_Z` when both switches are active, or when Z is at TOP and the top switch releases without a command.
 - **Heartbeat:** if PING is missing beyond the threshold, decelerate both joints in a controlled way, stop and brake Z, **keep drivers enabled** (releasing the motors can collapse the arm and drop Z), wait for the PC to reconnect and re-home.
-- **ESTOP:** stop joint pulses (short deceleration if moving fast; stop at once if triggered by a hardware button or LIMIT\_Z), stop and brake Z, keep drivers enabled, set the ESTOP flag. DISABLE only when the user commands a shutdown or a driver reports over-temperature or over-current.
+- **ESTOP:** stop joint pulses (short deceleration if moving fast; stop at once if triggered by a hardware button or LIMIT_Z), stop and brake Z, keep drivers enabled, set the ESTOP flag. DISABLE only when the user commands a shutdown or a driver reports over-temperature or over-current.
 - **Homing:** Z first (raise slowly until limit #1), then both joints using the AS5600 angle. Every MOVE is rejected with error:4 until homed.
 - **External pull-downs on D34 / D35,** and 5–10 ms debounce in firmware.
 
@@ -335,7 +340,7 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 - **All user-visible text is Vietnamese** and is defined only in `desktop_app/gui/strings_vi.py`, as a dictionary keyed by stable English IDs (for example `state.WAIT_HUMAN`, `alarm.LIMIT_Z`, `button.start`).
 - Internal values (FSM state names, alarm codes, engine mode keys, protocol text, config keys, log messages) stay English. Only the GUI layer maps an ID to Vietnamese.
 - Use UTF-8 everywhere. Make sure the chosen font renders Vietnamese diacritics correctly.
-- **Tests:** (1) every FSM state, alarm code and engine mode key has a Vietnamese string, with no missing keys; (2) a grep-style test confirms no Vietnamese characters appear outside strings\_vi.py and the docs.
+- **Tests:** (1) every FSM state, alarm code and engine mode key has a Vietnamese string, with no missing keys; (2) a grep-style test confirms no Vietnamese characters appear outside strings_vi.py and the docs.
 - The strings below are defaults taken from the architecture document or proposed here; the owner may reword them.
 
 ### 11.3 Strings: tabs, controls, sides, pieces
@@ -349,13 +354,13 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 | button.start | Bắt đầu |
 | button.pause | Tạm dừng |
 | button.resume | Tiếp tục |
-| button.new\_game | Ván mới |
+| button.new_game | Ván mới |
 | button.confirm | Xác nhận |
 | button.resync | Đồng bộ lại |
 | button.retry | Thử lại |
 | button.rehome | Homing lại |
 | button.cancel | Hủy |
-| button.save\_pgn | Lưu PGN |
+| button.save_pgn | Lưu PGN |
 | button.quit | Thoát |
 | button.estop | Dừng khẩn cấp |
 | button.refresh | Làm mới |
@@ -363,7 +368,7 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 | button.browse | Duyệt… |
 | label.camera | Camera |
 | label.model | Mô hình |
-| label.yolo\_switch | Bật/Tắt YOLO |
+| label.yolo_switch | Bật/Tắt YOLO |
 | label.side | Chọn màu quân |
 | label.mode | Chế độ chơi |
 | label.status | Trạng thái |
@@ -380,36 +385,36 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 | state.IDLE | Chương trình đang tắt |
 | state.INIT | Đang kết nối ESP32, camera, engine... |
 | state.CALIBRATE / state.HOMING | Đang kiểm tra hiệu chỉnh và homing |
-| state.SETUP\_CHECK | Kiểm tra thế cờ ban đầu |
-| state.WAIT\_HUMAN | Đến lượt bạn |
-| state.ENGINE\_THINK / state.PLAN | Máy đang nghĩ |
-| state.ROBOT\_EXEC | Robot đang đi quân |
+| state.SETUP_CHECK | Kiểm tra thế cờ ban đầu |
+| state.WAIT_HUMAN | Đến lượt bạn |
+| state.ENGINE_THINK / state.PLAN | Máy đang nghĩ |
+| state.ROBOT_EXEC | Robot đang đi quân |
 | state.VERIFY | Đang kiểm tra thế cờ |
 | state.PAUSED | Đã tạm dừng |
-| state.ERROR\_RECOVER | Có lỗi, cần xử lý |
-| state.GAME\_OVER | Ván cờ kết thúc |
+| state.ERROR_RECOVER | Có lỗi, cần xử lý |
+| state.GAME_OVER | Ván cờ kết thúc |
 | alarm.ESTOP | Đã dừng khẩn cấp |
-| alarm.LIMIT\_Z | Lỗi công tắc hành trình trục Z |
-| alarm.Z\_TIMEOUT | Trục Z quá thời gian, kiểm tra cơ khí |
-| alarm.SENSOR\_FAULT | Lỗi cảm biến góc, kiểm tra nam châm và dây |
-| alarm.HB\_TIMEOUT | Mất kết nối với ESP32 |
-| alarm.STEP\_LOSS | Động cơ mất bước, cần homing lại |
-| msg.camera\_lost | Mất tín hiệu camera |
-| msg.illegal\_move | Nước đi không hợp lệ hoặc quân đặt lệch |
-| msg.engine\_restart | Engine không phản hồi, đang khởi động lại |
-| msg.model\_load\_error | Không nạp được mô hình YOLO |
-| msg.ask\_fallback | Chạy lớp dự phòng OpenCV? |
-| msg.piece\_uncertain | Không chắc loại quân, vui lòng xác nhận |
-| msg.choose\_promotion | Chọn quân phong cấp |
-| msg.resume\_or\_new | Tiếp tục ván dở hay bắt đầu ván mới? |
+| alarm.LIMIT_Z | Lỗi công tắc hành trình trục Z |
+| alarm.Z_TIMEOUT | Trục Z quá thời gian, kiểm tra cơ khí |
+| alarm.SENSOR_FAULT | Lỗi cảm biến góc, kiểm tra nam châm và dây |
+| alarm.HB_TIMEOUT | Mất kết nối với ESP32 |
+| alarm.STEP_LOSS | Động cơ mất bước, cần homing lại |
+| msg.camera_lost | Mất tín hiệu camera |
+| msg.illegal_move | Nước đi không hợp lệ hoặc quân đặt lệch |
+| msg.engine_restart | Engine không phản hồi, đang khởi động lại |
+| msg.model_load_error | Không nạp được mô hình YOLO |
+| msg.ask_fallback | Chạy lớp dự phòng OpenCV? |
+| msg.piece_uncertain | Không chắc loại quân, vui lòng xác nhận |
+| msg.choose_promotion | Chọn quân phong cấp |
+| msg.resume_or_new | Tiếp tục ván dở hay bắt đầu ván mới? |
 | result.checkmate | Chiếu hết |
 | result.draw | Hòa |
 | result.stalemate | Hết nước đi (hòa) |
-| result.white\_wins / result.black\_wins | Trắng thắng / Đen thắng |
+| result.white_wins / result.black_wins | Trắng thắng / Đen thắng |
 
 ## 12. Phased build plan (vibe coding)
 
-For each phase: give the AI one prompt, have it write tests first or together with the code, run the tests, then commit. Always end a prompt with: Consult docs/SPEC.md, do not change hardware constants, and ask me when you meet a \[TO CONFIRM\] item.
+For each phase: give the AI one prompt, have it write tests first or together with the code, run the tests, then commit. Always end a prompt with: Consult docs/SPEC.md, do not change hardware constants, and ask me when you meet a [TO CONFIRM] item.
 
 ### Phase 0: Project skeleton
 
@@ -419,21 +424,21 @@ For each phase: give the AI one prompt, have it write tests first or together wi
 
 ### Phase 1: Kinematics
 
-- **Work:** five\_bar.py (FK, IK, Jacobian, μ), dimension.py (square centers, workspace), trajectory.py.
+- **Work:** five_bar.py (FK, IK, Jacobian, μ), dimension.py (square centers, workspace), trajectory.py.
 - **Done when:** the section 6.2 test vectors pass, FK(IK(P)) = P on all 64 squares, smallest μ is about 26°, and trajectories report an error before sending when a point is out of workspace.
 - **Prompt:** Implement the five-bar kinematics from section 6 as pure NumPy with no Qt or serial dependency. Write tests using the four vectors in the table and sweep all 64 squares.
 
 ### Phase 2: GameState, engine, FSM (simulated run)
 
-- **Work:** game\_state.py, engine.py (Stockfish, 5 modes), fsm.py, move\_planner.py (pick-and-place chains including capture, en passant, castling, promotion).
-- **Done when:** a full game plays on the console (user types moves, engine replies, Move Planner prints command chains); special moves are tested; recovery of pending\_move after a mid-move shutdown is tested.
+- **Work:** game_state.py, engine.py (Stockfish, 5 modes), fsm.py, move_planner.py (pick-and-place chains including capture, en passant, castling, promotion).
+- **Done when:** a full game plays on the console (user types moves, engine replies, Move Planner prints command chains); special moves are tested; recovery of pending_move after a mid-move shutdown is tested.
 - **Prompt:** Build GameState, engine and FSM per sections 7 and 9. Do not connect camera or robot yet; use stubs. Write a test for every transition in the state table and for the pause rules.
 
 ### Phase 3: Protocol, Robot Commander, ESP32 simulator
 
-- **Work:** protocol.py + protocol\_commands.py, serial\_link.py, robot\_commander.py, esp32\_simulator.py (models joint state, Z, the queue, queue full, heartbeat).
-- **Done when:** the whole pick-and-place chain runs through the simulator; ESTOP, LIMIT\_Z, Z\_TIMEOUT, SENSOR\_FAULT and a lost connection can be simulated; the FSM enters ERROR\_RECOVER correctly.
-- **Prompt:** Implement the protocol in section 5 and the Robot Commander. Write esp32\_simulator.py speaking the exact protocol over a virtual port pair. Add end-to-end tests: FSM to Move Planner to Commander to simulator.
+- **Work:** protocol.py + protocol_commands.py, serial_link.py, robot_commander.py, esp32_simulator.py (models joint state, Z, the queue, queue full, heartbeat).
+- **Done when:** the whole pick-and-place chain runs through the simulator; ESTOP, LIMIT_Z, Z_TIMEOUT, SENSOR_FAULT and a lost connection can be simulated; the FSM enters ERROR_RECOVER correctly.
+- **Prompt:** Implement the protocol in section 5 and the Robot Commander. Write esp32_simulator.py speaking the exact protocol over a virtual port pair. Add end-to-end tests: FSM to Move Planner to Commander to simulator.
 
 ### Phase 4: Firmware and no-load bench test
 
@@ -448,13 +453,13 @@ For each phase: give the AI one prompt, have it write tests first or together wi
 
 ### Phase 6: Vision
 
-- **Work:** camera\_manager.py, calibration.py, image capture and auto-labeling workflow, YOLO26 training, yolo\_detector.py, move\_detector.py, opencv\_fallback.py.
+- **Work:** camera_manager.py, calibration.py, image capture and auto-labeling workflow, YOLO26 training, yolo_detector.py, move_detector.py, opencv_fallback.py.
 - **Done when:** Move Detector recognizes moves correctly on recorded videos of many games (including captures, castling and promotion) without the robot; the target recognition rate is reached.
 - **Prompt:** Implement Move Detector per section 8.3 with a fake observed grid as input (no real YOLO). Test: lift and put back, occluded squares, two close hypotheses, promotion.
 
 ### Phase 7: GUI
 
-- **Work:** gui/ per section 11, wired through the Event Bus, with all text from strings\_vi.py.
+- **Work:** gui/ per section 11, wired through the Event Bus, with all text from strings_vi.py.
 - **Done when:** each FSM state shows the right set of enabled buttons; Emergency Stop is always clickable; pytest-qt checks button enabling per FSM state; the two string tests from section 11.2 pass.
 
 ### Phase 8: Integration and safety testing
@@ -467,10 +472,10 @@ For each phase: give the AI one prompt, have it write tests first or together wi
 The AI must not invent values for these; ask, then record them in hardware.yaml once known.
 
 - NEMA 17 model, phase current, inductance (needed to set TB6600 DIP SW4–SW6). Note: the uploaded NEMA17.PDF is a closed-loop motor with an integrated driver, not a plain NEMA 17.
-- Gear ratio i from motor to driving link, and whether each AS5600 is mounted on the joint axis or the motor axis.
+- Mounting of each AS5600 (joint axis or motor axis). With i = 1 (direct drive, confirmed) both give the same angle, so only the physical position needs fixing.
 - Rated voltage of the Z DC motor, the drivetrain type (trapezoidal lead screw), screw pitch, and a self-locking mechanism or counterweight that holds Z when power is lost; the actual L298 module (L298N?).
 - 5 V supply for the SG90 (needs a 24 to 5 V buck converter or a separate supply).
-- Coordinates of the capture zone, reserve zone and park position (outside the camera view, inside the workspace, μ ≥ 15°).
+- Final coordinates of the capture, reserve and park slots: proposed values are in section 6.4; measure them on the real board, and check that the park position is outside the camera view and the slot pitch fits the piece base diameter.
 - Serial baud rate, Z timeout (measure at assembly), maximum acceleration and speed, lost-step threshold (start at 3°).
 - Notation: in the original architecture document the symbol i means both lead-screw pitch and gear ratio; in this SPEC i is only the gear ratio. Fix the source document for consistency.
 
