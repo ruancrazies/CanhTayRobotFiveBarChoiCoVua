@@ -8,3 +8,6 @@ numpy>=1.26
 
 # Phase 2 onward (the PyPI name of python-chess is "chess")
 chess>=1.10
+
+# Phase 3 onward (serial link to the ESP32; the simulator needs no port)
+pyserial>=3.5
