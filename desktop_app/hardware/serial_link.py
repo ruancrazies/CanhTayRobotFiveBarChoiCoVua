@@ -51,6 +51,10 @@ from desktop_app.hardware.protocol import (
 
 logger = logging.getLogger(__name__)
 
+_JOIN_TIMEOUT_S = 3.0  # how long stop() waits for a worker thread
+_NEWLINE = b"\n"[0]  # the byte that ends a line
+_RAW_PREVIEW_BYTES = 24  # how much of an over-long line is kept for the log
+
 
 # --------------------------------------------------------------------------- #
 # Errors
@@ -96,6 +100,15 @@ class Transport(ABC):
     @property
     @abstractmethod
     def is_open(self) -> bool: ...
+
+    @property
+    def is_simulated(self) -> bool:
+        """True only for an in-process transport with no hardware behind it.
+
+        Fail-safe default: anything that does not say so is treated as a real port. The Robot
+        Commander's placeholder guard (SPEC 7.2) relies on this.
+        """
+        return False
 
     @abstractmethod
     def write(self, data: bytes) -> None:
@@ -252,6 +265,10 @@ class LoopbackTransport(Transport):
     def is_open(self) -> bool:
         return self._open
 
+    @property
+    def is_simulated(self) -> bool:
+        return True
+
     def _check(self) -> None:
         if not self._open:
             raise ConnectionLost(f"the {self._side} end is closed")
@@ -358,7 +375,7 @@ class LineFramer:
     def feed(self, data: bytes) -> list[Frame]:
         frames: list[Frame] = []
         for byte in data:
-            if byte == 0x0A:  # newline
+            if byte == _NEWLINE:
                 if self._discarding:
                     self._discarding = False
                 else:
@@ -371,7 +388,7 @@ class LineFramer:
             else:
                 self._buffer.append(byte)
                 if len(self._buffer) > self._max:
-                    frames.append(Frame(error=f"line longer than {self._max} bytes", raw=bytes(self._buffer[:32])))
+                    frames.append(Frame(error=f"line longer than {self._max} bytes", raw=bytes(self._buffer[:_RAW_PREVIEW_BYTES])))
                     self._buffer.clear()
                     self._discarding = True
         return frames
@@ -506,6 +523,10 @@ class SerialLink:
         return self._state
 
     @property
+    def transport(self) -> Transport:
+        return self._transport
+
+    @property
     def settings(self) -> LinkSettings:
         return self._settings
 
@@ -558,7 +579,7 @@ class SerialLink:
         self._transport.close()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=5.0)
+            thread.join(timeout=_JOIN_TIMEOUT_S)
         self._thread = None
         with self._cond:
             self._state = LinkState.STOPPED
@@ -579,8 +600,12 @@ class SerialLink:
     # Sending
     # ------------------------------------------------------------------ #
 
-    def send(self, command: Command, timeout_s: float) -> None:
+    def send(self, command: Command, timeout_s: float, *, urgent: bool = False) -> None:
         """Send ``command``, waiting up to ``timeout_s`` for a free in-flight slot.
+
+        ``urgent`` skips the wait for a slot (the command still counts as in flight, so replies stay
+        matched). It exists for the heartbeat and the emergency stop, which must never queue behind a
+        saturated stream of MOVE commands.
 
         Raises:
             SendTimeoutError: no slot became free in time (the command was not sent).
@@ -592,7 +617,7 @@ class SerialLink:
             while True:
                 if self._state is not LinkState.CONNECTED:
                     raise LinkDownError(f"the link is {self._state.value}; {command.name} was not sent")
-                if len(self._in_flight) < self._settings.max_in_flight:
+                if urgent or len(self._in_flight) < self._settings.max_in_flight:
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

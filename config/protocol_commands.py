@@ -46,6 +46,27 @@ ERROR_PREFIX = "error:"
 ALARM_PREFIX = "!alarm:"
 
 
+class CommandName(str, Enum):
+    """The command names of SPEC 5.1, in the order of the table. Code elsewhere spells a command
+    ``CommandName.PING.value`` instead of copying the word."""
+
+    HOME = "HOME"
+    MOVE = "MOVE"
+    ZUP = "ZUP"
+    ZDOWN = "ZDOWN"
+    ZSTOP = "ZSTOP"
+    ACCEL = "ACCEL"
+    GRIP = "GRIP"
+    ENABLE = "ENABLE"
+    DISABLE = "DISABLE"
+    WAIT = "WAIT"
+    POS = "POS"
+    INFO = "INFO"
+    PING = "PING"
+    ESTOP = "ESTOP"
+    RESET = "RESET"
+
+
 class ErrorCode(IntEnum):
     """``error:<code>`` (SPEC 5.2)."""
 
@@ -136,25 +157,25 @@ def _float(name: str, *, minimum: Optional[float] = None, maximum: Optional[floa
 
 
 _COMMAND_LIST: tuple[CommandSpec, ...] = (
-    CommandSpec("HOME", (_flag("Z"), _flag("AB")), "Homing; no flag = Z first, then both joints", completion=Completion.DONE),
+    CommandSpec(CommandName.HOME.value, (_flag("Z"), _flag("AB")), "Homing; no flag = Z first, then both joints", completion=Completion.DONE),
     CommandSpec(
-        "MOVE",
+        CommandName.MOVE.value,
         (_float("A"), _float("B"), _float("F", positive=True)),
         "Queue a move of both joints to alpha (A) and beta (B) at speed F; no Z parameter",
     ),
-    CommandSpec("ZUP", (), "Raise Z until limit #1 triggers", completion=Completion.DONE),
-    CommandSpec("ZDOWN", (), "Lower Z until limit #2 triggers", completion=Completion.DONE),
-    CommandSpec("ZSTOP", (), "Stop and brake Z immediately"),
-    CommandSpec("ACCEL", (_float("S", positive=True),), "Acceleration for the following segments"),
-    CommandSpec("GRIP", (_float("S", minimum=0.0, maximum=180.0),), "Gripper servo angle in degrees"),
-    CommandSpec("ENABLE", (), "Enable both TB6600 drivers"),
-    CommandSpec("DISABLE", (), "Disable both TB6600 drivers"),
-    CommandSpec("WAIT", (), "Wait for the motion queue to drain", completion=Completion.DONE),
-    CommandSpec("POS", (), "Commanded angles, AS5600 angles, steps issued, Z state", data_line="POS"),
-    CommandSpec("INFO", (), "Firmware and protocol version", data_line="INFO"),
-    CommandSpec("PING", (), "Heartbeat from the PC"),
-    CommandSpec("ESTOP", (), "Stop the joints and Z, set the ESTOP flag", ack=Ack.ESTOP_ALARM),
-    CommandSpec("RESET", (), "Clear ESTOP and the alarms; homing is mandatory afterwards"),
+    CommandSpec(CommandName.ZUP.value, (), "Raise Z until limit #1 triggers", completion=Completion.DONE),
+    CommandSpec(CommandName.ZDOWN.value, (), "Lower Z until limit #2 triggers", completion=Completion.DONE),
+    CommandSpec(CommandName.ZSTOP.value, (), "Stop and brake Z immediately"),
+    CommandSpec(CommandName.ACCEL.value, (_float("S", positive=True),), "Acceleration for the following segments"),
+    CommandSpec(CommandName.GRIP.value, (_float("S", minimum=0.0, maximum=180.0),), "Gripper servo angle in degrees"),
+    CommandSpec(CommandName.ENABLE.value, (), "Enable both TB6600 drivers"),
+    CommandSpec(CommandName.DISABLE.value, (), "Disable both TB6600 drivers"),
+    CommandSpec(CommandName.WAIT.value, (), "Wait for the motion queue to drain", completion=Completion.DONE),
+    CommandSpec(CommandName.POS.value, (), "Commanded angles, AS5600 angles, steps issued, Z state", data_line="POS"),
+    CommandSpec(CommandName.INFO.value, (), "Firmware and protocol version", data_line="INFO"),
+    CommandSpec(CommandName.PING.value, (), "Heartbeat from the PC"),
+    CommandSpec(CommandName.ESTOP.value, (), "Stop the joints and Z, set the ESTOP flag", ack=Ack.ESTOP_ALARM),
+    CommandSpec(CommandName.RESET.value, (), "Clear ESTOP and the alarms; homing is mandatory afterwards"),
 )
 
 COMMANDS: Mapping[str, CommandSpec] = MappingProxyType({spec.name: spec for spec in _COMMAND_LIST})

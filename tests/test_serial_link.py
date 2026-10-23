@@ -749,6 +749,7 @@ def test_reconnect_resumes_without_resending_anything(rig: Any) -> None:
     r.device_lines(1)
     r.pair.cut()
     assert r.wait_for(lambda: r.link.state is LinkState.RECONNECTING)
+    assert r.wait_for(lambda: any(isinstance(m, Disconnected) for m in r.messages))  # delivered after the state change
     event = next(m for m in r.messages if isinstance(m, Disconnected))
     assert event.lost == (pending,) and event.will_retry is True
     time.sleep(0.05)
@@ -828,3 +829,53 @@ def test_the_link_works_over_pyserials_loopback_port() -> None:
         assert link.in_flight == 1
     finally:
         link.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Urgent sends and the simulated-transport flag (used by the Robot Commander)
+# --------------------------------------------------------------------------- #
+
+
+def test_an_urgent_command_does_not_wait_for_a_free_slot(rig: Any) -> None:
+    r = rig(LinkSettings(max_in_flight=1, read_poll_s=0.01))
+    r.link.send(move(1), 1.0)
+    with pytest.raises(SendTimeoutError):
+        r.link.send(PING, 0.05)  # an ordinary command waits for the slot...
+    r.link.send(PING, 0.05, urgent=True)  # ...the heartbeat and ESTOP do not
+    assert r.device_lines(2) == ["MOVE A=1 B=2 F=3", "PING"]
+    assert r.link.in_flight == 2
+    r.device_says("ok", "ok")  # replies are still matched in order
+    assert r.wait_for(lambda: r.link.in_flight == 0)
+    replies = [m for m in r.messages if isinstance(m, Reply)]
+    assert [m.command.name for m in replies] == ["MOVE", "PING"]
+
+
+def test_an_urgent_command_on_a_down_link_still_fails(rig: Any) -> None:
+    r = rig()
+    r.pair.cut()
+    assert r.wait_for(lambda: r.link.state is LinkState.DISCONNECTED)
+    with pytest.raises(LinkDownError):
+        r.link.send(ESTOP, 0.1, urgent=True)
+
+
+def test_only_the_loopback_transport_counts_as_simulated() -> None:
+    pair = loopback_pair()
+    assert pair.pc.is_simulated and pair.device.is_simulated
+    assert not PySerialTransport("loop://", 9600, write_timeout_s=1.0).is_simulated  # pyserial's loop:// is still the real class
+
+    class Custom(LoopbackTransport.__mro__[1]):  # type: ignore[misc]
+        def open(self) -> None: ...
+        def close(self) -> None: ...
+        @property
+        def is_open(self) -> bool:
+            return True
+        def write(self, data: bytes) -> None: ...
+        def read(self, timeout_s: float) -> bytes:
+            return b""
+
+    assert not Custom().is_simulated  # fail-safe: an unknown transport is treated as a real port
+
+
+def test_the_link_exposes_its_transport(rig: Any) -> None:
+    r = rig()
+    assert r.link.transport is r.pair.pc

@@ -44,7 +44,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Optional
 
-from config.protocol_commands import PROTOCOL_VERSION, AlarmCode, ErrorCode, ZState
+from config.protocol_commands import PROTOCOL_VERSION, AlarmCode, CommandName, ErrorCode, ZState
 from desktop_app.hardware.protocol import (
     Command,
     CommandError,
@@ -65,6 +65,8 @@ from desktop_app.hardware.serial_link import (
 from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
 
 logger = logging.getLogger(__name__)
+
+_JOIN_TIMEOUT_S = 3.0  # how long stop() waits for a worker thread
 
 JointLimits = tuple[tuple[float, float], tuple[float, float]]  # ((alpha_min, alpha_max), (beta_min, beta_max))
 
@@ -131,6 +133,19 @@ class SimConfig:
         return self.z_timeout_factor * self.z_travel_s
 
 
+@dataclass(frozen=True)
+class TraceEvent:
+    """Something physical the arm did, with where the joints were: used to replay what was picked and dropped.
+
+    ``kind`` is ``"z_bottom"`` (Z reached the bottom limit), ``"z_top"`` (Z reached the top limit) or
+    ``"grip"`` (the servo was commanded; ``grip_deg`` is its angle).
+    """
+
+    kind: str
+    joints_deg: tuple[float, float]
+    grip_deg: float
+
+
 @dataclass
 class _Segment:
     """The MOVE being executed: a straight interpolation of both joints in time."""
@@ -164,7 +179,11 @@ _TIME_SLACK_S = 1e-9
 def _reached(now: float, moment: float) -> bool:
     """True when ``now`` is at or after ``moment``."""
     return now + _TIME_SLACK_S >= moment
-_ALWAYS_ALLOWED_IN_ESTOP = frozenset({"PING", "POS", "INFO", "RESET", "ESTOP", "ZSTOP"})
+_ALWAYS_ALLOWED_IN_ESTOP = frozenset(
+    name.value
+    for name in (CommandName.PING, CommandName.POS, CommandName.INFO, CommandName.RESET, CommandName.ESTOP, CommandName.ZSTOP)
+)
+_HOME, _ZUP, _ZDOWN = CommandName.HOME.value, CommandName.ZUP.value, CommandName.ZDOWN.value
 
 
 class Esp32Simulator:
@@ -211,6 +230,8 @@ class Esp32Simulator:
         self.received: list[str] = []  # every non-blank line received, in order
         self.sent: list[str] = []  # every line sent (also those lost on a dead cable)
         self.violations: list[str] = []
+        self.trace: list[TraceEvent] = []
+        self._hooks: list[Callable[[str], None]] = []
 
     # ------------------------------------------------------------------ #
     # Read-only view for tests
@@ -264,6 +285,15 @@ class Esp32Simulator:
     def heartbeat_armed(self) -> bool:
         return self._hb_armed
 
+    def add_command_hook(self, hook: Callable[[str], None]) -> None:
+        """Call ``hook(line)`` right after each received command has been handled.
+
+        It runs in the serving thread, so a hook may call the ``inject_*`` methods to put a fault at an
+        exact point of the command stream (no timing race). A hook must not block.
+        """
+        with self._lock:
+            self._hooks.append(hook)
+
     # ------------------------------------------------------------------ #
     # Serving
     # ------------------------------------------------------------------ #
@@ -282,7 +312,7 @@ class Esp32Simulator:
         self._transport.close()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=5.0)
+            thread.join(timeout=_JOIN_TIMEOUT_S)
         self._thread = None
         self._link_up = False
 
@@ -408,6 +438,8 @@ class Esp32Simulator:
             self._error(ErrorCode.IN_ESTOP)
             return
         getattr(self, f"_cmd_{command.name.lower()}")(command, now)
+        for hook in list(self._hooks):
+            hook(line.strip())
 
     def _ok(self) -> None:
         self._send(encode_ok())
@@ -418,7 +450,7 @@ class Esp32Simulator:
         self._ok()
 
     def _cmd_info(self, _command: Command, _now: float) -> None:
-        self._send(encode_data_line("INFO", FW=self.config.firmware_version, PROTO=PROTOCOL_VERSION))
+        self._send(encode_data_line(CommandName.INFO.value, FW=self.config.firmware_version, PROTO=PROTOCOL_VERSION))
         self._ok()
 
     def _cmd_pos(self, _command: Command, now: float) -> None:
@@ -426,7 +458,7 @@ class Esp32Simulator:
         off_a, off_b = self._sensor_offset
         self._send(
             encode_data_line(
-                "POS",
+                CommandName.POS.value,
                 A=a,
                 B=b,
                 SA=a + off_a,
@@ -446,6 +478,7 @@ class Esp32Simulator:
         if self._z_state(now) is not ZState.BOTTOM:
             self.violations.append(f"GRIP with Z {self._z_state(now).value}")
         self._grip_deg = float(command.params["S"])
+        self.trace.append(TraceEvent("grip", self._joint_now(now), self._grip_deg))
         self._ok()
 
     def _cmd_enable(self, _command: Command, _now: float) -> None:
@@ -482,10 +515,10 @@ class Esp32Simulator:
         self._ok()
 
     def _cmd_zup(self, _command: Command, now: float) -> None:
-        self._start_z("ZUP", _Z_TOP, now)
+        self._start_z(_ZUP, _Z_TOP, now)
 
     def _cmd_zdown(self, _command: Command, now: float) -> None:
-        self._start_z("ZDOWN", _Z_BOTTOM, now)
+        self._start_z(_ZDOWN, _Z_BOTTOM, now)
 
     def _start_z(self, kind: str, target: float, now: float) -> None:
         if self.joints_moving:
@@ -517,7 +550,7 @@ class Esp32Simulator:
         self._home_job = _HomeJob(joints=want_joints)
         if want_z:
             self._homed_z = False
-            self._z_move = _ZMove("HOME", _Z_TOP, now, now + self.config.z_timeout_s)
+            self._z_move = _ZMove(_HOME, _Z_TOP, now, now + self.config.z_timeout_s)
         else:  # joints only: Z is already at TOP, so the joint phase starts now
             self._home_job.joints_end = now + self.config.home_joints_s
         if want_joints:
@@ -599,7 +632,11 @@ class Esp32Simulator:
             return
         self._z_pos = move.target
         self._z_move = None
-        if move.kind == "HOME":
+        if move.target == _Z_BOTTOM:
+            self.trace.append(TraceEvent("z_bottom", self._joint_now(now), self._grip_deg))
+        elif move.kind != _HOME:
+            self.trace.append(TraceEvent("z_top", self._joint_now(now), self._grip_deg))
+        if move.kind == _HOME:
             self._homed_z = True
             job = self._home_job
             if job is not None and job.joints:
