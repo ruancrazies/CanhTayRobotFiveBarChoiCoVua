@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,23 @@ def _isolate_engine_path_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path_fac
 
     monkeypatch.delenv(engine.STOCKFISH_PATH_ENV, raising=False)
     monkeypatch.setattr(engine, "DEFAULT_LOCAL_CONFIG_PATH", tmp_path_factory.getbasetemp() / "no-local-config.json")
+
+
+@pytest.fixture(autouse=True)
+def _drop_handlers_a_test_left_on_the_root_logger() -> Any:
+    """A command-line test may install a console handler on the captured (later closed) stderr.
+
+    Left behind, it makes every later log call from a background thread print "Logging error" noise and,
+    on a slow machine, delays those threads. Handlers added during a test are removed when it ends.
+    """
+    root = logging.getLogger()
+    before = list(root.handlers)
+    level = root.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in before:
+            root.removeHandler(handler)
+    root.setLevel(level)
 
 
 @pytest.fixture
