@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "command_parser.h"
-#include "config.h"
+#include "project_headers.h"
 
 namespace chessbot {
 

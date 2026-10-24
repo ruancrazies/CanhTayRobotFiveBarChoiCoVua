@@ -308,3 +308,143 @@ def test_stage_4a_touches_no_motion_pin() -> None:
         assert name not in code, name
     for call in ("ledcSetup", "ledcAttach", "ledcWrite", "Wire.", "attachInterrupt", "analogWrite", "tone("):
         assert call not in code, call
+
+
+# --------------------------------------------------------------------------- #
+# Include paths (phase 4a fixes)
+# --------------------------------------------------------------------------- #
+
+STUB = FIRMWARE / "tools" / "host_main" / "Arduino.h"
+INCLUDE_PATH_SPELLINGS = {"include", "${platformio.include_dir}", "$PROJECT_INCLUDE_DIR"}
+
+
+def _include_dirs(ini: configparser.ConfigParser, section: str) -> list[str]:
+    """The ``-I`` directories of an environment's build_flags, normalised (``-Iinclude`` and ``-I include``)."""
+    tokens = ini[section].get("build_flags", "").split()
+    dirs: list[str] = []
+    for index, token in enumerate(tokens):
+        if token == "-I" and index + 1 < len(tokens):
+            dirs.append(tokens[index + 1])
+        elif token.startswith("-I"):
+            dirs.append(token[2:])
+    return [d.removeprefix("./").rstrip("/") for d in dirs]
+
+
+@pytest.mark.parametrize("section", ["env:esp32dev", "env:native"])
+def test_platformio_ini_puts_the_project_include_directory_on_the_include_path(ini: configparser.ConfigParser, section: str) -> None:
+    dirs = _include_dirs(ini, section)
+    assert set(dirs) & INCLUDE_PATH_SPELLINGS, f"{section} has no -I for the project include/ directory (build_flags -I: {dirs})"
+    assert (FIRMWARE / "include").is_dir()
+
+
+def test_both_environments_use_the_same_include_path(ini: configparser.ConfigParser) -> None:
+    assert sorted(_include_dirs(ini, "env:esp32dev")) == sorted(_include_dirs(ini, "env:native"))
+
+
+def test_the_include_path_check_itself_fails_without_the_flag() -> None:
+    bare = configparser.ConfigParser(interpolation=None)
+    bare.read_string("[env:esp32dev]\nbuild_flags =\n    -std=gnu++17\n    -Wall\n")
+    assert not set(_include_dirs(bare, "env:esp32dev")) & INCLUDE_PATH_SPELLINGS
+    spaced = configparser.ConfigParser(interpolation=None)
+    spaced.read_string("[env:esp32dev]\nbuild_flags = -I include -I./other/\n")
+    assert _include_dirs(spaced, "env:esp32dev") == ["include", "other"]
+
+
+QUOTED_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
+
+
+@pytest.mark.parametrize("path", [*CORE_FILES, MAIN_CPP], ids=lambda p: p.name)
+def test_every_quoted_include_of_the_core_and_main_resolves_next_to_the_including_file(path: Path) -> None:
+    """PlatformIO gives libraries no path to include/, and appends project -I flags after the SDK's, so a
+    bare ``#include "config.h"`` fails to build or finds an SDK file. Each include must resolve relative
+    to the file that contains it (the first place a quoted include is looked up)."""
+    for name in QUOTED_INCLUDE.findall(_code_only_keep_includes(path.read_text(encoding="utf-8"))):
+        found_next_to_file = (path.parent / name).is_file()
+        # main.cpp (in src/) reaches the library through PlatformIO's library finder, which adds lib/chessbot_core/src
+        # to the path of the project sources; the library's own header names are unique to the project.
+        found_in_own_library = path == MAIN_CPP and (CORE_DIR / name).is_file()
+        assert found_next_to_file or found_in_own_library, f"{path.name}: #include \"{name}\" is not found next to the file (it would depend on -I)"
+
+
+def _code_only_keep_includes(text: str) -> str:
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+
+
+def test_the_path_relative_include_check_would_catch_a_bare_include(tmp_path: Path) -> None:
+    (tmp_path / "bad.h").write_text('#include "config.h"\n', encoding="utf-8")
+    names = QUOTED_INCLUDE.findall((tmp_path / "bad.h").read_text(encoding="utf-8"))
+    assert names == ["config.h"] and not (tmp_path / names[0]).is_file()
+
+
+def test_the_bridge_header_reaches_the_project_headers() -> None:
+    bridge = CORE_DIR / "project_headers.h"
+    assert bridge.is_file()
+    resolved = {(bridge.parent / name).resolve() for name in QUOTED_INCLUDE.findall(bridge.read_text(encoding="utf-8"))}
+    assert resolved == {CONFIG_H.resolve(), PROTOCOL_H.resolve()}
+
+
+def test_no_core_file_includes_a_project_header_other_than_through_the_bridge() -> None:
+    for path in CORE_FILES:
+        if path.name == "project_headers.h":
+            continue
+        for name in QUOTED_INCLUDE.findall(path.read_text(encoding="utf-8")):
+            assert "include/" not in name and name not in {"config.h", "pins.h", "protocol.h"}, f"{path.name}: #include \"{name}\""
+
+
+# --------------------------------------------------------------------------- #
+# Names that Arduino.h defines
+# --------------------------------------------------------------------------- #
+
+# Required members of the stub's list (the names a collision is most likely with). The stub may define more.
+REQUIRED_ARDUINO_NAMES = {
+    "bit", "min", "max", "abs", "round", "sq", "constrain", "radians", "degrees", "word", "byte", "boolean",
+    "HIGH", "LOW", "INPUT", "OUTPUT", "DEFAULT", "B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "PI", "F",
+    "SDA", "SCL", "SS", "TX", "RX", "A0", "T0",
+}
+# main.cpp is the one file allowed to use the Arduino API itself.
+MAIN_MAY_USE = {"HIGH", "LOW", "OUTPUT"}
+
+
+def _stub_names() -> tuple[set[str], set[str]]:
+    """(object-like macros and global names, function-like macros) defined by the Arduino stub."""
+    text = STUB.read_text(encoding="utf-8")
+    objects = set(re.findall(r"^#define\s+(\w+)(?=\s|$)", text, re.M))
+    functions = set(re.findall(r"^#define\s+(\w+)\(", text, re.M))
+    objects |= set(re.findall(r"^static const \w+ (\w+) =", text, re.M))
+    objects |= set(re.findall(r"^typedef [\w ]+ (\w+);", text, re.M))
+    objects -= {"HOST_ARDUINO_STUB_H"}
+    return objects, functions
+
+
+def _strip_literals(code: str) -> str:
+    code = re.sub(r'"(?:\\.|[^"\\])*"', '""', code)
+    return re.sub(r"'(?:\\.|[^'\\])+'", "''", code)
+
+
+def test_the_arduino_stub_defines_the_names_that_matter() -> None:
+    objects, functions = _stub_names()
+    assert REQUIRED_ARDUINO_NAMES <= objects | functions, sorted(REQUIRED_ARDUINO_NAMES - (objects | functions))
+    assert {"bit", "min", "max", "abs", "round", "sq", "constrain", "radians", "degrees", "word", "F"} <= functions
+
+
+def _collisions(code: str, allowed: set[str] = frozenset()) -> list[str]:  # type: ignore[assignment]
+    objects, functions = _stub_names()
+    code = _strip_literals(_code_only(code))
+    found = {m for m in re.findall(r"\b[A-Za-z_]\w*\b", code) if m in objects and m not in allowed}
+    found |= {m for m in functions if re.search(rf"\b{m}\s*\(", code) and m not in allowed}
+    return sorted(found)
+
+
+@pytest.mark.parametrize("path", [*CORE_FILES, CONFIG_H, PINS_H, PROTOCOL_H, MAIN_CPP], ids=lambda p: p.name)
+def test_no_identifier_collides_with_an_arduino_macro_or_global(path: Path) -> None:
+    allowed = MAIN_MAY_USE if path == MAIN_CPP else set()
+    assert _collisions(path.read_text(encoding="utf-8"), allowed) == [], f"{path.name} uses a name Arduino.h defines"
+
+
+def test_the_collision_scan_would_catch_the_bit_function_and_a_byte_parameter() -> None:
+    assert _collisions("static uint8_t bit(protocol::AlarmCode alarm) { return 1; }") == ["bit"]
+    assert _collisions("Result feed(uint8_t byte);") == ["byte"]
+    assert _collisions("int x = max(a, b); const int PI = 3;") == ["PI", "max"]
+    assert _collisions("X(MOVE, F, FLOAT, 1, 1)") == []  # F is only a macro when followed by "("
+    assert _collisions('log("bit and byte"); // bit(3)') == []
+    assert _collisions("int word(int a);") == ["word"]  # the real macro would rename it silently, so only a scan sees it

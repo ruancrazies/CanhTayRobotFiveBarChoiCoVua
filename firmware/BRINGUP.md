@@ -18,12 +18,20 @@ All versions are pinned in `platformio.ini`. Several pins could not be checked w
 PlatformIO registry was unreachable): **the first `pio run` is also the check of those pins.** If it fails
 while resolving a package, paste the whole output back; do not loosen the pin by hand.
 
-Host-side unit tests (no board needed):
+Host-side checks (no board needed):
 
 ```
-pio test -e native                    # reference runner (Unity 2.6.1)
-firmware/tools/run_host_tests.sh      # same test sources with plain g++, if pio native is unavailable
+pio test -e native                    # reference runner for the unit tests (Unity 2.6.1)
+firmware/tools/run_host_tests.sh      # plain g++/clang++: unit tests, main.cpp against an Arduino stub,
+                                      # every header compiled alone, SDK-style include shadowing, strict warnings
+pytest tests/test_firmware_headers.py tests/test_firmware_layout.py
 ```
+
+None of these compiles for the ESP32. They imitate what broke the first ESP32 build (libraries in `lib/` do not
+see `include/`, PlatformIO appends project `-I` flags after the SDK's, `Arduino.h` defines macros such as `bit`),
+but only `pio run -e esp32dev` on your machine proves the firmware builds. If it still fails, paste the first
+error; if it names an Arduino macro or an SDK header, add that name to `firmware/tools/host_main/Arduino.h` so
+the host checks catch it next time.
 
 ## 2. Flash
 

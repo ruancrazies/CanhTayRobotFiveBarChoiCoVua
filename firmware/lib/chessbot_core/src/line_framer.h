@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#include "config.h"
+#include "project_headers.h"
 
 namespace chessbot {
 
@@ -26,7 +26,7 @@ class LineFramer {
   void reset();
 
   // Feed one received byte. Each byte yields at most one result.
-  Result feed(uint8_t byte);
+  Result feed(uint8_t input);
 
   // The last good line, NUL terminated, without terminator. Valid until the next feed().
   const char* text() const { return buffer_; }

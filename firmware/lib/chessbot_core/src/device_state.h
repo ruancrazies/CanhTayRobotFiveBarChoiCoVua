@@ -5,8 +5,7 @@
 
 #include <stdint.h>
 
-#include "config.h"
-#include "protocol.h"
+#include "project_headers.h"
 
 namespace chessbot {
 
@@ -56,7 +55,7 @@ class DeviceState {
   bool drivers_enabled() const { return drivers_enabled_; }
   void set_drivers_enabled(bool value) { drivers_enabled_ = value; }
 
-  bool alarm_latched(protocol::AlarmCode alarm) const { return (alarms_ & bit(alarm)) != 0; }
+  bool alarm_latched(protocol::AlarmCode alarm) const { return (alarms_ & alarm_bit(alarm)) != 0; }
   bool any_alarm() const { return alarms_ != 0; }
 
   // ESTOP (command or button): set the flag, latch ESTOP, homing becomes mandatory. The drivers stay
@@ -88,8 +87,8 @@ class DeviceState {
   }
 
  private:
-  static uint8_t bit(protocol::AlarmCode alarm) { return static_cast<uint8_t>(1U << static_cast<uint8_t>(alarm)); }
-  void latch(protocol::AlarmCode alarm) { alarms_ = static_cast<uint8_t>(alarms_ | bit(alarm)); }
+  static uint8_t alarm_bit(protocol::AlarmCode alarm) { return static_cast<uint8_t>(1U << static_cast<uint8_t>(alarm)); }
+  void latch(protocol::AlarmCode alarm) { alarms_ = static_cast<uint8_t>(alarms_ | alarm_bit(alarm)); }
   void clear_homed() {
     homed_z_ = false;
     homed_joints_ = false;

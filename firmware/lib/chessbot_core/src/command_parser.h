@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#include "protocol.h"
+#include "project_headers.h"
 
 namespace chessbot {
 

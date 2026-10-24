@@ -1,6 +1,6 @@
 #include "command_processor.h"
 
-#include "config.h"
+#include "project_headers.h"
 #include "response_format.h"
 
 namespace chessbot {

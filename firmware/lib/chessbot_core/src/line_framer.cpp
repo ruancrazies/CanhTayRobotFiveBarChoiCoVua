@@ -15,8 +15,8 @@ void LineFramer::reset() {
   buffer_[0] = '\0';
 }
 
-LineFramer::Result LineFramer::feed(uint8_t byte) {
-  if (byte == kNewline) {
+LineFramer::Result LineFramer::feed(uint8_t input) {
+  if (input == kNewline) {
     if (discarding_) {
       discarding_ = false;
       length_ = 0;
@@ -47,7 +47,7 @@ LineFramer::Result LineFramer::feed(uint8_t byte) {
     discarding_ = true;
     return Result::kError;
   }
-  buffer_[length_++] = static_cast<char>(byte);
+  buffer_[length_++] = static_cast<char>(input);
   return Result::kNone;
 }
 

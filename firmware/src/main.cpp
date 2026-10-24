@@ -9,10 +9,13 @@
 #include <Arduino.h>
 #include <string.h>
 
+// The project headers are included by a path relative to this file, not by bare name: PlatformIO appends the
+// project's -I flags after the framework's include directories, so an SDK header called config.h or
+// protocol.h could be found first. (A quoted include is looked up next to this file before any -I directory.)
+#include "../include/config.h"
+#include "../include/pins.h"
+#include "../include/protocol.h"
 #include "chessbot_core.h"
-#include "config.h"
-#include "pins.h"
-#include "protocol.h"
 
 namespace {
 

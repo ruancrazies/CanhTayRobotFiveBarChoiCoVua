@@ -25,6 +25,14 @@ inline void fail(const char* file, int line, const char* what) {
   current_failed() = true;
   throw Failure();
 }
+// The arguments are only used inside this call, so a temporary such as ``make_string().c_str()`` stays alive.
+inline void assert_equal_string(const char* expected, const char* actual, const char* file, int line) {
+  if (expected == nullptr || actual == nullptr || std::strcmp(expected, actual) != 0) {
+    char message[400];
+    std::snprintf(message, sizeof(message), "Expected '%s' Was '%s'", expected ? expected : "(null)", actual ? actual : "(null)");
+    fail(file, line, message);
+  }
+}
 }  // namespace host_unity
 
 #define UNITY_BEGIN() (std::printf("-- host unity shim --\n"), 0)
@@ -71,15 +79,7 @@ inline void fail(const char* file, int line, const char* what) {
   } while (0)
 #define TEST_ASSERT_EQUAL_UINT8(expected, actual) TEST_ASSERT_EQUAL_INT(expected, actual)
 #define TEST_ASSERT_EQUAL_UINT32(expected, actual) TEST_ASSERT_EQUAL_INT(expected, actual)
-#define TEST_ASSERT_EQUAL_STRING(expected, actual)                                                     \
-  do {                                                                                                 \
-    const char* e_ = (expected); const char* a_ = (actual);                                            \
-    if (e_ == nullptr || a_ == nullptr || std::strcmp(e_, a_) != 0) {                                  \
-      char m_[400];                                                                                    \
-      std::snprintf(m_, sizeof(m_), "Expected '%s' Was '%s'", e_ ? e_ : "(null)", a_ ? a_ : "(null)"); \
-      host_unity::fail(__FILE__, __LINE__, m_);                                                        \
-    }                                                                                                  \
-  } while (0)
+#define TEST_ASSERT_EQUAL_STRING(expected, actual) host_unity::assert_equal_string((expected), (actual), __FILE__, __LINE__)
 #define TEST_ASSERT_DOUBLE_WITHIN(delta, expected, actual)                                             \
   do { if (!(std::fabs(static_cast<double>(expected) - static_cast<double>(actual)) <= static_cast<double>(delta))) \
          host_unity::fail(__FILE__, __LINE__, "Expected a double within delta of " #expected); } while (0)
