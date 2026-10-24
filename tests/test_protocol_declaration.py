@@ -2,8 +2,10 @@
 
 * The declaration is compared with docs/SPEC.md section 5, parsed from the SPEC text itself.
 * The codec and the simulator may not carry a copy of the declaration (static scan).
-* firmware/include/protocol.h does not exist until phase 4, so the cross-check against it is the
-  clearly named placeholder ``test_phase4_protocol_h_matches_the_declaration`` below.
+* firmware/include/protocol.h is parsed and compared with the declaration: command names and order,
+  error codes, alarm codes, Z states, response words, each command's parameters (kind, required, range),
+  completion and acknowledgement, the data lines and their field order. The header parser is itself
+  tested with deliberately wrong headers, so the comparison cannot pass by finding nothing.
 """
 
 from __future__ import annotations
@@ -171,26 +173,200 @@ def test_no_module_copies_a_command_alarm_or_response_name(module: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
-# PHASE 4 HOOK: the cross-check against firmware/include/protocol.h
+# firmware/include/protocol.h against the declaration
 # --------------------------------------------------------------------------- #
 
 
-def test_phase4_protocol_h_matches_the_declaration() -> None:
-    """EXTEND IN PHASE 4. Compare firmware/include/protocol.h with config/protocol_commands.py.
+def _strip_comments(text: str) -> str:
+    return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
 
-    The header does not exist yet (phase 4), so there is nothing to compare and the test says so
-    instead of passing silently. When the file appears, this test starts running a first, format
-    independent check (every command name and alarm code is spelled in the header). Phase 4 must
-    replace that with the exact comparison: the error code numbers, the parameter ranges, the
-    completion kind of each command and the field order of POS and INFO, in the header's own syntax.
-    """
-    if not PROTOCOL_H.exists():
-        pytest.skip("firmware/include/protocol.h does not exist yet: phase 4 creates it and extends this test")
-    header = PROTOCOL_H.read_text(encoding="utf-8")
-    missing = [name for name in [*COMMANDS, *(code.value for code in AlarmCode)] if not re.search(rf"\b{name}\b", header)]
-    assert missing == [], f"protocol.h does not declare {missing}"
-    error_numbers = sorted(int(code) for code in ErrorCode)
-    pytest.fail(
-        "protocol.h exists but the exact cross-check is not written yet; extend this test "
-        f"(error codes {error_numbers}, parameter ranges, completion kinds, POS/INFO field order)"
-    )
+
+def _macro_rows(text: str, macro: str) -> list[list[str]]:
+    """The ``X(a, b, c)`` entries of ``#define <macro>(X) ...`` as lists of stripped arguments."""
+    lines = _strip_comments(text).splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(rf"\s*#define\s+{macro}\(X\)", line)), None)
+    assert start is not None, f"protocol.h has no #define {macro}(X)"
+    body: list[str] = []
+    for line in lines[start:]:
+        body.append(line.rstrip().rstrip("\\"))
+        if not line.rstrip().endswith("\\"):
+            break
+    rows = re.findall(r"\bX\(([^()]*)\)", " ".join(body))
+    return [[argument.strip() for argument in row.split(",")] for row in rows]
+
+
+def _constant(text: str, name: str) -> str:
+    match = re.search(rf"constexpr\s+\w+\s+{name}(?:\[\])?\s*=\s*(.+?);", _strip_comments(text))
+    assert match, f"protocol.h does not define {name}"
+    return match.group(1).strip()
+
+
+def _number(text: str) -> float:
+    return float(text)
+
+
+def header_declaration(text: str) -> dict[str, object]:
+    """What protocol.h says, in the shape of :func:`comparable_declaration`."""
+    commands: dict[str, dict[str, object]] = {}
+    for name, completion, ack, data_line in _macro_rows(text, "CB_COMMANDS"):
+        commands[name] = {"completion": completion, "ack": ack, "data_line": data_line, "params": []}
+    for command, name, kind, required, positive, has_min, low, has_max, high in _macro_rows(text, "CB_PARAMS"):
+        assert command in commands, f"CB_PARAMS names the undeclared command {command}"
+        commands[command]["params"].append(  # type: ignore[union-attr]
+            {
+                "name": name,
+                "kind": kind,
+                "required": required == "1",
+                "positive": positive == "1",
+                "minimum": _number(low) if has_min == "1" else None,
+                "maximum": _number(high) if has_max == "1" else None,
+            }
+        )
+    data_lines: dict[str, list[tuple[str, str]]] = {}
+    for line, name, kind in _macro_rows(text, "CB_DATA_FIELDS"):
+        data_lines.setdefault(line, []).append((name, kind))
+    return {
+        "protocol_version": int(_constant(text, "kProtocolVersion")),
+        "float_decimals": int(_constant(text, "kFloatDecimals")),
+        "line_terminator": _constant(text, "kLineTerminator"),
+        "responses": {
+            "ok": _constant(text, "kResponseOk").strip('"'),
+            "done": _constant(text, "kResponseDone").strip('"'),
+            "error_prefix": _constant(text, "kErrorPrefix").strip('"'),
+            "alarm_prefix": _constant(text, "kAlarmPrefix").strip('"'),
+        },
+        "error_codes": {name: int(number) for name, number in _macro_rows(text, "CB_ERROR_CODES")},
+        "alarm_codes": [row[0] for row in _macro_rows(text, "CB_ALARM_CODES")],
+        "z_states": [row[0] for row in _macro_rows(text, "CB_Z_STATES")],
+        "commands": commands,
+        "data_lines": data_lines,
+        "max_params_per_command": int(_constant(text, "kMaxParamsPerCommand")),
+    }
+
+
+def comparable_declaration() -> dict[str, object]:
+    """The Python declaration, written the way the header spells things (upper-case kinds, NONE, ESTOP_ALARM)."""
+    data = declaration_as_dict()
+    ack_names = {"ok": "OK", "!alarm:ESTOP": "ESTOP_ALARM"}
+    commands = {
+        name: {
+            "completion": spec["completion"].upper(),
+            "ack": ack_names[spec["ack"]],
+            "data_line": spec["data_line"] or "NONE",
+            "params": [
+                {
+                    "name": p["name"],
+                    "kind": p["kind"].upper(),
+                    "required": p["required"],
+                    "positive": p["positive"],
+                    "minimum": p["minimum"],
+                    "maximum": p["maximum"],
+                }
+                for p in spec["params"]
+            ],
+        }
+        for name, spec in data["commands"].items()
+    }
+    return {
+        "protocol_version": data["protocol_version"],
+        "float_decimals": declaration.FLOAT_DECIMALS,
+        "line_terminator": "'\\n'",
+        "responses": data["responses"],
+        "error_codes": data["error_codes"],
+        "alarm_codes": data["alarm_codes"],
+        "z_states": data["z_states"],
+        "commands": commands,
+        "data_lines": {
+            name: [(f["name"], f["kind"].upper()) for f in fields] for name, fields in data["data_lines"].items()
+        },
+        "max_params_per_command": max(len(spec["params"]) for spec in data["commands"].values()),
+    }
+
+
+@pytest.fixture(scope="module")
+def header_text() -> str:
+    assert PROTOCOL_H.exists(), "firmware/include/protocol.h is missing"
+    return PROTOCOL_H.read_text(encoding="utf-8")
+
+
+def test_protocol_h_command_names_and_order_match(header_text: str) -> None:
+    header = header_declaration(header_text)
+    assert list(header["commands"]) == list(COMMAND_ORDER)  # type: ignore[arg-type]
+
+
+def test_protocol_h_error_codes_match_and_are_1_to_5(header_text: str) -> None:
+    header = header_declaration(header_text)
+    assert header["error_codes"] == {code.name: int(code) for code in ErrorCode}
+    assert sorted(header["error_codes"].values()) == [1, 2, 3, 4, 5]  # type: ignore[union-attr]
+
+
+def test_protocol_h_alarm_codes_match_in_order(header_text: str) -> None:
+    assert header_declaration(header_text)["alarm_codes"] == [code.value for code in AlarmCode]
+
+
+def test_protocol_h_z_states_match(header_text: str) -> None:
+    assert header_declaration(header_text)["z_states"] == comparable_declaration()["z_states"]
+
+
+def test_protocol_h_wire_words_and_version_match(header_text: str) -> None:
+    header, expected = header_declaration(header_text), comparable_declaration()
+    for key in ("protocol_version", "float_decimals", "line_terminator", "responses"):
+        assert header[key] == expected[key], key
+
+
+def test_protocol_h_parameters_match_the_declaration(header_text: str) -> None:
+    header, expected = header_declaration(header_text), comparable_declaration()
+    for name in COMMAND_ORDER:
+        assert header["commands"][name]["params"] == expected["commands"][name]["params"], name  # type: ignore[index]
+    assert header["max_params_per_command"] == expected["max_params_per_command"]
+
+
+def test_protocol_h_completion_ack_and_data_line_match(header_text: str) -> None:
+    header, expected = header_declaration(header_text), comparable_declaration()
+    for name in COMMAND_ORDER:
+        for key in ("completion", "ack", "data_line"):
+            assert header["commands"][name][key] == expected["commands"][name][key], f"{name} {key}"  # type: ignore[index]
+
+
+def test_protocol_h_data_line_fields_match_in_order(header_text: str) -> None:
+    header, expected = header_declaration(header_text), comparable_declaration()
+    assert header["data_lines"] == expected["data_lines"]
+    assert list(header["data_lines"]) == ["POS", "INFO"]  # type: ignore[arg-type]
+
+
+def test_protocol_h_matches_the_declaration_as_a_whole(header_text: str) -> None:
+    assert header_declaration(header_text) == comparable_declaration()
+
+
+# The comparison must be able to fail: each deliberately wrong header below has to be seen as different.
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ("X(UNRECOGNIZED, 1)", "X(UNRECOGNIZED, 6)"),  # an error code number
+        ("X(LIMIT_Z)", "X(LIMIT_ZZ)"),  # an alarm name
+        ("X(HB_TIMEOUT)", "X(HB_TIMEOUTS)"),  # the last alarm name
+        ("X(ZUP, DONE, OK, NONE)", "X(ZUP, NONE, OK, NONE)"),  # a completion kind
+        ("X(ESTOP, NONE, ESTOP_ALARM, NONE)", "X(ESTOP, NONE, OK, NONE)"),  # an acknowledgement
+        ("X(GRIP, S, FLOAT, 1, 0, 1, 0, 1, 180)", "X(GRIP, S, FLOAT, 1, 0, 1, 0, 1, 181)"),  # a range
+        ("X(MOVE, F, FLOAT, 1, 1, 0, 0, 0, 0)", "X(MOVE, F, FLOAT, 1, 0, 0, 0, 0, 0)"),  # positive
+        ("X(HOME, Z, FLAG, 0, 0, 0, 0, 0, 0)", "X(HOME, Z, FLAG, 1, 0, 0, 0, 0, 0)"),  # required
+        ("X(POS, SA, FLOAT)", "X(POS, SB, FLOAT)"),  # a field name
+        ("X(INFO, PROTO, INT)", "X(INFO, FW, TEXT)"),  # field order / kind
+        ("constexpr int kProtocolVersion = 1;", "constexpr int kProtocolVersion = 2;"),
+        ('constexpr char kErrorPrefix[] = "error:";', 'constexpr char kErrorPrefix[] = "err:";'),
+        ("X(PING, NONE, OK, NONE)", "X(PINGS, NONE, OK, NONE)"),  # a command name
+    ],
+)
+def test_the_cross_check_detects_a_wrong_header(header_text: str, old: str, new: str) -> None:
+    assert old in header_text, f"the mutation target {old!r} is not in protocol.h any more: update this test"
+    assert header_declaration(header_text.replace(old, new, 1)) != comparable_declaration()
+
+
+def test_the_cross_check_detects_a_missing_command_and_a_swapped_order(header_text: str) -> None:
+    line = "  X(PING, NONE, OK, NONE)          \\\n"
+    assert line in header_text
+    assert header_declaration(header_text.replace(line, "", 1))["commands"] != comparable_declaration()["commands"]
+    swapped = header_text.replace("  X(HOME, DONE, OK, NONE)          \\\n  X(MOVE, NONE, OK, NONE)          \\\n",
+                                  "  X(MOVE, NONE, OK, NONE)          \\\n  X(HOME, DONE, OK, NONE)          \\\n", 1)
+    assert swapped != header_text
+    assert list(header_declaration(swapped)["commands"]) != list(COMMAND_ORDER)  # type: ignore[arg-type]

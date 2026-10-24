@@ -1,0 +1,7 @@
+{
+  "name": "chessbot_core",
+  "version": "0.1.0",
+  "description": "Hardware-independent core of the chess robot firmware: line framing, command parser, response formatter, bounded command queue, state flags. No Arduino includes.",
+  "frameworks": "*",
+  "platforms": "*"
+}
