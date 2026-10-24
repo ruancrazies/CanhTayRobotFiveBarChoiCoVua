@@ -146,7 +146,7 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 
 - Keep only a few unacknowledged commands in flight so the ESP32 queue always has work without overflowing.
 - Send PING periodically. If the ESP32 misses heartbeats beyond the threshold it stops safely (section 10).
-- After ESTOP, lost steps, HB_TIMEOUT or SENSOR_FAULT, homing is mandatory.
+- After every firmware alarm (ESTOP, STEP_LOSS, HB_TIMEOUT, SENSOR_FAULT, LIMIT_Z, Z_TIMEOUT), homing is mandatory. LIMIT_Z and Z_TIMEOUT leave Z away from TOP, where the firmware answers every MOVE with error:4.
 
 ## 6. Kinematics and trajectory
 
@@ -228,7 +228,7 @@ Wraps `chess.Board`; the only place allowed to change the position.
 | ROBOT_EXEC | Send commands, wait for ok and done; Move Detector locked | VERIFY or ERROR_RECOVER |
 | VERIFY | Robot to park position, capture image, YOLO compares piece types per square with the expected position; match → `commit_move(engine)`, update CorrectionMap | WAIT_HUMAN, GAME_OVER or ERROR_RECOVER |
 | PAUSED | Keep GameState, Move Detector locked, robot at park position | The step that would have followed |
-| ERROR_RECOVER | Entered from any running state on ESTOP, HB_TIMEOUT, SENSOR_FAULT, camera loss or a planning failure. Report error, highlight suspect squares, wait for Resync. After ESTOP, lost steps, HB_TIMEOUT or SENSOR_FAULT, homing is mandatory; keep pending_move | WAIT_HUMAN, PLAN, ENGINE_THINK, HOMING or GAME_OVER |
+| ERROR_RECOVER | Entered from any running state on ESTOP, HB_TIMEOUT, SENSOR_FAULT, camera loss or a planning failure. Report error, highlight suspect squares, wait for Resync. After every firmware alarm (ESTOP, STEP_LOSS, HB_TIMEOUT, SENSOR_FAULT, LIMIT_Z, Z_TIMEOUT), homing is mandatory; camera loss does not require it; keep pending_move | WAIT_HUMAN, PLAN, ENGINE_THINK, HOMING or GAME_OVER |
 | GAME_OVER | Show result, save PGN | INIT or SETUP_CHECK |
 
 The arm moves only in HOMING, ROBOT_EXEC and VERIFY (return to the park position); ENGINE_THINK and PLAN only compute. Move detection is locked in every state except WAIT_HUMAN.

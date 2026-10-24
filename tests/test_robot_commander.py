@@ -529,3 +529,95 @@ def test_the_simulator_saw_no_protocol_violation(tmp_path: Path) -> None:
         assert stack.sim.violations == []
     finally:
         stack.close()
+
+
+# --------------------------------------------------------------------------- #
+# The injected clock: deadlines and the heartbeat schedule follow it, not the wall clock
+# --------------------------------------------------------------------------- #
+
+
+def muted_stack(tmp_path: Path, clock: Any, **settings: Any) -> tuple[Any, Any]:
+    from phase3_support import MutedTransport
+
+    holder: dict[str, Any] = {}
+
+    def wrap(inner: Any) -> Any:
+        holder["transport"] = MutedTransport(inner)
+        return holder["transport"]
+
+    # the simulator runs on the wall clock: give it a heartbeat limit longer than any of these tests
+    stack = build_stack(
+        tmp_path, transport_wrapper=wrap, clock=clock, settings_overrides=settings, sim_overrides=dict(heartbeat_timeout_s=60.0)
+    )
+    return stack, holder["transport"]
+
+
+def test_pings_follow_the_injected_clock(tmp_path: Path) -> None:
+    from sim_support import ManualClock
+
+    clock = ManualClock()
+    stack, _transport = muted_stack(tmp_path, clock, ping_interval_s=10.0)
+    try:
+        assert wait_for(lambda: count_pings(stack) == 1)  # the first one goes out at start
+        import time
+
+        time.sleep(0.2)  # real time passes, the injected clock does not: no second PING
+        assert count_pings(stack) == 1
+        for expected in (2, 3):
+            clock.advance(10.0)
+            assert wait_for(lambda: count_pings(stack) == expected), expected
+    finally:
+        stack.close()
+
+
+def test_a_reply_timeout_is_decided_by_the_injected_clock(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    from sim_support import ManualClock
+
+    clock = ManualClock()
+    stack, transport = muted_stack(tmp_path, clock, ping_interval_s=1000.0, reply_timeout_s=2.0)
+    try:
+        assert wait_for(lambda: count_pings(stack) == 1)
+        transport.muted = True  # the link stays up, nobody answers
+        outcome: dict[str, BaseException] = {}
+
+        def ask() -> None:
+            try:
+                stack.commander.position()
+            except BaseException as exc:  # noqa: BLE001 - the test reports whatever happened
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=ask, daemon=True)
+        thread.start()
+        time.sleep(0.3)
+        assert thread.is_alive(), "the timeout must not run on the wall clock"
+        clock.advance(2.5)
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        assert isinstance(outcome.get("error"), ReplyTimeoutError)
+    finally:
+        stack.close()
+
+
+def test_an_unanswered_ping_raises_hb_timeout_once_when_the_injected_clock_says_so(tmp_path: Path) -> None:
+    import time
+
+    from sim_support import ManualClock
+
+    clock = ManualClock()
+    stack, transport = muted_stack(tmp_path, clock, ping_interval_s=10.0, reply_timeout_s=2.0)
+    try:
+        assert wait_for(lambda: count_pings(stack) == 1)
+        transport.muted = True
+        clock.advance(10.0)  # the next PING goes out and is never answered
+        time.sleep(0.3)
+        assert stack.alarm_requests == []  # the reply timeout has not elapsed on the injected clock
+        clock.advance(2.5)
+        assert wait_for(lambda: stack.alarm_requests == [AlarmCode.HB_TIMEOUT.value])
+        clock.advance(30.0)
+        time.sleep(0.3)
+        assert stack.alarm_requests == [AlarmCode.HB_TIMEOUT.value]  # once per episode
+    finally:
+        stack.close()

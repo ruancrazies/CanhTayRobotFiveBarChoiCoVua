@@ -244,3 +244,58 @@ def test_the_repository_documents_local_json_with_an_example_file() -> None:
     data = json.loads(text)
     assert set(data) <= LOCAL_CONFIG_KEYS
     assert isinstance(data["stockfish_path"], str) and data["stockfish_path"].strip()
+
+
+# --------------------------------------------------------------------------- #
+# The real-Stockfish test: its skipif and its body must agree
+# --------------------------------------------------------------------------- #
+
+
+def _fake_binary(tmp_path: Path) -> Path:
+    """An executable file that is not a chess engine: enough for 'the binary exists'."""
+    path = tmp_path / "fake-stockfish"
+    path.write_text("not an engine\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_locate_stockfish_follows_the_application_precedence(tmp_path: Path) -> None:
+    from stockfish_support import locate_stockfish
+
+    binary = _fake_binary(tmp_path)
+    absent = tmp_path / "absent.json"
+    assert locate_stockfish({STOCKFISH_PATH_ENV: str(binary)}, absent) == (str(binary), "")
+    local = write_local(tmp_path, {"stockfish_path": str(binary)})
+    assert locate_stockfish({}, local) == (str(binary), "")
+    # the environment wins over the local file: a missing env binary is NOT rescued by the local file
+    path, reason = locate_stockfish({STOCKFISH_PATH_ENV: str(tmp_path / "gone")}, local)
+    assert path is None and "gone" in reason and PathSource.ENVIRONMENT.value in reason
+    path, reason = locate_stockfish({}, write_local(tmp_path, "[not an object]"))
+    assert path is None and "invalid" in reason
+
+
+def _run_real_stockfish_test(tmp_path: Path, environ_extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k != STOCKFISH_PATH_ENV}
+    env.update(environ_extra)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rs", "tests/test_engine.py", "-k", "real_stockfish"],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False, timeout=120,
+    )
+
+
+def test_a_configured_binary_makes_the_real_stockfish_test_run_not_skip_and_not_assert(tmp_path: Path) -> None:
+    """Regression: the isolation fixture hid STOCKFISH_PATH from the body, so a found binary failed 'path is not None'."""
+    result = _run_real_stockfish_test(tmp_path, {STOCKFISH_PATH_ENV: str(_fake_binary(tmp_path))})
+    output = result.stdout + result.stderr
+    assert "skipped" not in output.splitlines()[-1], output  # the skipif found the binary, so the test must run
+    # it still fails (the file is not an engine), but on starting the engine, never on the path assertion
+    assert "failed" in output.splitlines()[-1], output
+    assert "AssertionError" not in output, output
+    assert "EngineUnavailableError" in output, output
+
+
+def test_without_a_binary_the_real_stockfish_test_is_skipped_with_the_reason(tmp_path: Path) -> None:
+    result = _run_real_stockfish_test(tmp_path, {STOCKFISH_PATH_ENV: str(tmp_path / "missing-stockfish")})
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "1 skipped" in output and "missing-stockfish" in output and PathSource.ENVIRONMENT.value in output, output

@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +30,7 @@ from desktop_app.core.engine import (
 )
 from desktop_app.core.event_bus import EventBus
 from phase2_support import E2E4, FakeBackends, engine_config
+from stockfish_support import REAL_STOCKFISH_PATH, REAL_STOCKFISH_SKIP_REASON
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO_ROOT / "config" / "difficulty_levels.json"
@@ -360,16 +360,11 @@ def test_backend_reports_a_missing_binary() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _stockfish_path() -> str | None:
-    configured = engine_config().path
-    return shutil.which(configured) or (configured if Path(configured).is_file() else None)
-
-
 @pytest.mark.integration
-@pytest.mark.skipif(_stockfish_path() is None, reason="the Stockfish binary configured in difficulty_levels.json is not installed")
+@pytest.mark.skipif(REAL_STOCKFISH_PATH is None, reason=REAL_STOCKFISH_SKIP_REASON)
 def test_real_stockfish_answers_in_the_fast_modes_and_after_a_forced_restart() -> None:
     config = engine_config()
-    path = _stockfish_path()
+    path = REAL_STOCKFISH_PATH  # the same value the skipif used: decided once, before the isolation fixture ran
     assert path is not None
     fast = type(config)(
         path=path,

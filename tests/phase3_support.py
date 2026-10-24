@@ -89,6 +89,35 @@ class RealLookingTransport(Transport):
         return self._inner.read(timeout_s)
 
 
+class MutedTransport(Transport):
+    """A cable whose PC-to-device direction can be silenced: the link stays up, nothing is ever answered."""
+
+    def __init__(self, inner: LoopbackTransport) -> None:
+        self._inner = inner
+        self.muted = False
+
+    def open(self) -> None:
+        self._inner.open()
+
+    def close(self) -> None:
+        self._inner.close()
+
+    @property
+    def is_open(self) -> bool:
+        return self._inner.is_open
+
+    @property
+    def is_simulated(self) -> bool:
+        return self._inner.is_simulated
+
+    def write(self, data: bytes) -> None:
+        if not self.muted:
+            self._inner.write(data)
+
+    def read(self, timeout_s: float) -> bytes:
+        return self._inner.read(timeout_s)
+
+
 # --------------------------------------------------------------------------- #
 # Replay of what the arm physically did
 # --------------------------------------------------------------------------- #
@@ -277,6 +306,7 @@ def build_stack(
     link_settings: Optional[LinkSettings] = None,
     start_commander: bool = True,
     transport_wrapper: Optional[Callable[[LoopbackTransport], Transport]] = None,
+    clock: Optional[Callable[[], float]] = None,
 ) -> Stack:
     fen, _human, _engine = SCENARIOS[scenario]
     bus = EventBus()
@@ -291,7 +321,8 @@ def build_stack(
     transport: Transport = transport_wrapper(pair.pc) if transport_wrapper else pair.pc
     link = SerialLink(transport, link_settings or LinkSettings(max_in_flight=3, read_poll_s=0.005))
     link.start()
-    commander = RobotCommander(link, planner, commander_settings(**(settings_overrides or {})), bus)
+    extra: dict[str, Any] = {} if clock is None else {"clock": clock}
+    commander = RobotCommander(link, planner, commander_settings(**(settings_overrides or {})), bus, **extra)
 
     reserve = {
         f"reserve_slot[{i}]": chess.Piece(piece_type, chess.BLACK) for i, piece_type in enumerate(planner.reserve_pieces)

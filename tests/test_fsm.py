@@ -201,7 +201,7 @@ def test_verify_ok_goes_to_game_over_when_the_engine_move_ends_the_game(tmp_path
 
 
 @pytest.mark.parametrize("alarm", sorted(HOMING_MANDATORY_ALARMS))
-def test_homing_is_mandatory_after_estop_step_loss_heartbeat_and_sensor_faults(tmp_path: Path, alarm: str) -> None:
+def test_homing_is_mandatory_after_every_firmware_alarm(tmp_path: Path, alarm: str) -> None:
     rig = Rig(tmp_path).reach(S.ROBOT_EXEC)
     rig.do(T.EXEC_FAILED, alarm=alarm)
     assert rig.state is S.ERROR_RECOVER and rig.fsm.homing_required
@@ -214,7 +214,7 @@ def test_homing_is_mandatory_after_estop_step_loss_heartbeat_and_sensor_faults(t
     assert rig.state is S.PLAN
 
 
-@pytest.mark.parametrize("alarm", [None, "LIMIT_Z", "Z_TIMEOUT"])
+@pytest.mark.parametrize("alarm", [None, "CAMERA_LOST"])
 def test_other_failures_resync_back_to_plan_without_homing(tmp_path: Path, alarm: str | None) -> None:
     rig = Rig(tmp_path).reach(S.ROBOT_EXEC)
     rig.do(T.EXEC_FAILED, alarm=alarm) if alarm else rig.do(T.EXEC_FAILED)
@@ -574,7 +574,7 @@ def test_requests_from_the_gui_arrive_through_the_bus_and_the_fsm_decides(tmp_pa
 # Failures and alarms (SPEC 7.2, "Rules clarified in phase 2")
 # --------------------------------------------------------------------------- #
 
-MANDATORY_HOMING = {"ESTOP", "STEP_LOSS", "HB_TIMEOUT", "SENSOR_FAULT"}  # SPEC 5.3, typed out
+MANDATORY_HOMING = {"ESTOP", "STEP_LOSS", "HB_TIMEOUT", "SENSOR_FAULT", "LIMIT_Z", "Z_TIMEOUT"}  # SPEC 5.3, typed out
 PRE_GAME = {S.INIT, S.CALIBRATE, S.HOMING, S.SETUP_CHECK}
 ALL_ALARMS = ["ESTOP", "HB_TIMEOUT", "SENSOR_FAULT", "STEP_LOSS", "LIMIT_Z", "Z_TIMEOUT", "CAMERA_LOST"]
 

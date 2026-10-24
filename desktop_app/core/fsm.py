@@ -101,8 +101,9 @@ class Trigger(str, Enum):
     ALARM = "alarm"  # asynchronous alarm or camera loss; payload: alarm (required, one of ALARM_CODES)
 
 
-# After these alarms homing is mandatory (SPEC 5.3 and 7.2).
-HOMING_MANDATORY_ALARMS = frozenset({"ESTOP", "STEP_LOSS", "HB_TIMEOUT", "SENSOR_FAULT"})
+# After every firmware alarm homing is mandatory (SPEC 5.3 and 7.2). LIMIT_Z and Z_TIMEOUT leave Z away from TOP,
+# where the firmware answers every MOVE with error:4, so they are in the list. CAMERA_LOST is not a robot alarm.
+HOMING_MANDATORY_ALARMS = frozenset({"ESTOP", "STEP_LOSS", "HB_TIMEOUT", "SENSOR_FAULT", "LIMIT_Z", "Z_TIMEOUT"})
 # Alarm codes the FSM accepts with ALARM: the firmware alarms of SPEC 5.2 plus camera loss (msg.camera_lost).
 ALARM_CODES = frozenset({"ESTOP", "HB_TIMEOUT", "SENSOR_FAULT", "STEP_LOSS", "LIMIT_Z", "Z_TIMEOUT", "CAMERA_LOST"})
 

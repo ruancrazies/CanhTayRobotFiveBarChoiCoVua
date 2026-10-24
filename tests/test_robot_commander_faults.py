@@ -14,7 +14,7 @@ import pytest
 
 from config.protocol_commands import AlarmCode, CommandName, ErrorCode
 from desktop_app.core.fsm import HOMING_MANDATORY_ALARMS, State, Trigger
-from desktop_app.hardware.robot_commander import NotAtStartError, NotReadyError, RobotAlarmError
+from desktop_app.hardware.robot_commander import CommandFailedError, NotAtStartError, NotReadyError, RobotAlarmError
 from desktop_app.hardware.esp32_simulator import Esp32Simulator
 from desktop_app.utils.hardware_config import load_hardware_config
 from phase3_support import SCENARIOS, Stack, build_stack
@@ -72,7 +72,7 @@ def test_a_fault_mid_chain_leads_to_error_recover(tmp_path: Path, name: str) -> 
         assert stack.alarm_requests == [alarm], "the alarm must reach the FSM exactly once"
         assert stack.fsm.state is State.ERROR_RECOVER
         assert stack.game.pending_move is not None, "the engine move is kept and redone after recovery"
-        assert stack.fsm.homing_required == (alarm in HOMING_MANDATORY_ALARMS)
+        assert stack.fsm.homing_required  # every firmware alarm makes homing mandatory
         assert stack.commander.needs_homing  # the Commander never trusts the arm after an alarm
         assert stack.commander.last_alarm is not None and stack.commander.last_alarm.code == alarm
         assert stack.sim.violations == []
@@ -201,10 +201,15 @@ def test_recovery_after_a_fault_before_any_motion(tmp_path: Path) -> None:
 
 
 def test_recovery_after_a_fault_mid_chain_is_refused_until_the_arm_is_back_at_the_start(tmp_path: Path) -> None:
-    """HOME leaves the arm where it is, so a chain restarted mid-board must not run (a human must park the arm)."""
+    """HOME leaves the arm where it is, so a chain restarted mid-board must not run (a human must park the arm).
+
+    The fault is put at the first ZDOWN, not at "the fifth MOVE": the WAIT before ZDOWN guarantees that the arm
+    has finished its moves and stands over the first piece, whatever the resolution of the machine's clock.
+    (With a 15.6 ms clock tick, as on Windows, MOVEs queued back to back make no progress before the fault.)
+    """
     stack = build_stack(tmp_path)
     try:
-        fault_when(stack, CommandName.MOVE.value, NTH_MOVE, lambda sim: sim.inject_estop())
+        fault_when(stack, CommandName.ZDOWN.value, 1, lambda sim: sim.inject_estop())
         run_until_fault(stack)
         assert stack.fsm.handle(Trigger.RESYNC).accepted
         stack.commander.home()
@@ -221,51 +226,40 @@ def test_recovery_after_a_fault_mid_chain_is_refused_until_the_arm_is_back_at_th
 
 
 # --------------------------------------------------------------------------- #
-# A SPEC gap, documented by tests
+# Every firmware alarm makes homing mandatory (SPEC 5.3, 7.2)
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("alarm", ["LIMIT_Z", "Z_TIMEOUT"])
-def test_spec_gap_limit_z_and_z_timeout_do_not_make_homing_mandatory_in_the_fsm(tmp_path: Path, alarm: str) -> None:
-    """SPEC 7.2 lists ESTOP, STEP_LOSS, HB_TIMEOUT and SENSOR_FAULT as the alarms that force homing.
+def test_the_fsm_demands_homing_after_every_declared_alarm() -> None:
+    assert set(HOMING_MANDATORY_ALARMS) == {code.value for code in AlarmCode}
 
-    LIMIT_Z and Z_TIMEOUT are not in that list, yet both leave Z away from TOP, where the firmware answers every
-    MOVE with error:4 (SPEC 5.1). This test records what happens today; it must be revisited when the owner
-    decides (the SPEC and ``HOMING_MANDATORY_ALARMS`` would change together).
-    The Commander protects the arm on its own: it demands homing after ANY alarm.
-    """
+
+@pytest.mark.parametrize("alarm", ["LIMIT_Z", "Z_TIMEOUT"])
+def test_after_a_z_alarm_the_loop_goes_through_homing_and_does_not_spin(tmp_path: Path, alarm: str) -> None:
+    """LIMIT_Z and Z_TIMEOUT used to resync straight to PLAN, where the Commander refused: an endless loop."""
     command, nth, inject, _ = FAULTS[alarm.lower()]
     stack = build_stack(tmp_path)
     try:
         fault_when(stack, command, nth, inject)
         run_until_fault(stack)
-        assert alarm not in HOMING_MANDATORY_ALARMS
-        assert not stack.fsm.homing_required
-        assert stack.commander.needs_homing
+        assert stack.fsm.homing_required and stack.commander.needs_homing
 
-        # RESYNC goes straight back to PLAN: the FSM believes the arm is ready ...
         assert stack.fsm.handle(Trigger.RESYNC).accepted
-        assert stack.fsm.state is State.PLAN
-        stack.plan()
-        # ... and the Commander refuses, so the loop would go PLAN -> ROBOT_EXEC -> ERROR_RECOVER -> PLAN forever
-        failure = stack.execute()
-        assert isinstance(failure, NotReadyError)
-        assert stack.fsm.state is State.ERROR_RECOVER
-        # the firmware agrees with the Commander: Z is not at the top, the arm is not usable until HOME
-        assert stack.sim.z_state.value != "TOP" or not stack.sim.homed
+        assert stack.fsm.state is State.HOMING  # not PLAN
+        stack.commander.home()  # RESET, then HOME
+        assert stack.fsm.handle(Trigger.HOMING_DONE).accepted
+        assert stack.sim.z_state.value == "TOP" and stack.sim.homed
+        assert stack.commander.homed
     finally:
         stack.close()
 
 
-def test_spec_gap_firmware_answers_error_4_after_limit_z(tmp_path: Path) -> None:
+def test_the_firmware_answers_error_4_after_limit_z_until_homed(tmp_path: Path) -> None:
     stack = build_stack(tmp_path)
     try:
         fault_when(stack, CommandName.ZDOWN.value, 1, lambda sim: sim.inject_limit_z())
         run_until_fault(stack)
-        # RESET clears the alarm; without a HOME the ESP32 still refuses motion (not homed)
-        stack.commander.bench_command(CommandName.RESET.value)
-        from desktop_app.hardware.robot_commander import CommandFailedError
-
+        stack.commander.bench_command(CommandName.RESET.value)  # clears the alarm; homing is still needed
         with pytest.raises(CommandFailedError) as raised:
             stack.commander.bench_command(CommandName.MOVE.value, A=150.0, B=30.0, F=100.0)
         assert raised.value.code is ErrorCode.NOT_HOMED

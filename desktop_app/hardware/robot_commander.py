@@ -6,8 +6,8 @@ What it does
   point, ``WAIT`` to drain the motion queue before every Z move and every ``GRIP``, ``ZDOWN`` /
   ``ZUP`` with their ``done``, ``GRIP`` with a settle time. The plan checks itself: MOVE only with Z
   at TOP, GRIP only with Z at BOTTOM, Z never moves while MOVEs are still queued.
-* Streams the commands through the :class:`SerialLink` (which limits the unacknowledged commands in
-  flight), waits for every ``ok`` and for every ``done``, and stops at the first problem.
+* Sends the commands through the :class:`SerialLink`, waits for every ``ok`` and for every ``done``, and stops at
+  the first problem (MOVEs one at a time, see below).
 * Sends ``PING`` periodically in its own thread, bypassing the in-flight window so the heartbeat can
   never queue behind a saturated MOVE stream (SPEC 5.3, 10.2).
 * Publishes every alarm on the Event Bus as an FSM ``ALARM`` request, BEFORE it releases the thread
@@ -27,9 +27,11 @@ placeholder values.
 Decisions the SPEC leaves open (reported in the phase 3 summary)
 -----------------------------------------------------------------
 * Any alarm, or a lost link, makes homing mandatory for the Commander (and a ``RESET`` goes before
-  the next ``HOME``). The FSM's list (SPEC 7.2) names only ESTOP, STEP_LOSS, HB_TIMEOUT and
-  SENSOR_FAULT; LIMIT_Z and Z_TIMEOUT leave Z away from TOP, where the firmware answers every MOVE
-  with error:4. See ``tests/test_robot_commander_faults.py`` (``test_spec_gap_*``).
+  the next ``HOME``). The FSM agrees: every firmware alarm is in ``HOMING_MANDATORY_ALARMS`` (SPEC 5.3, 7.2).
+* MOVEs are sent one at a time, each waited for, and a MOVE refused with ``error:3`` is sent again after a
+  pause: ``ok`` means "queued", so the in-flight limit (SPEC 5.3) cannot bound the firmware queue, and with
+  several MOVEs in flight a refused one could be followed by an accepted one (out of order).
+* Every deadline and the PING schedule read an injectable ``clock`` (default ``time.monotonic``).
 * A lost serial link is reported to the FSM as ``HB_TIMEOUT``: the ESP32 will have hit its own
   heartbeat timeout, and it is the same consequence (stopped, homing mandatory).
 * An alarm code that is not declared triggers an emergency stop at once.
@@ -81,6 +83,7 @@ from desktop_app.hardware.serial_link import (
 logger = logging.getLogger(__name__)
 
 _JOIN_TIMEOUT_S = 3.0  # how long stop() waits for a worker thread
+_CLOCK_POLL_S = 0.05  # waits wake this often to re-read the clock, so an injected clock can end them
 
 _PING = CommandName.PING.value
 _WAIT = CommandName.WAIT.value
@@ -327,7 +330,9 @@ class RobotCommander:
         planner: PlaceholderSource,
         settings: CommanderSettings,
         bus: Optional[EventBus] = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock  # every deadline and the heartbeat schedule read it; tests inject a manual clock
         self._link = link
         self._planner = planner
         self._settings = settings
@@ -595,7 +600,7 @@ class RobotCommander:
         queue, because ``ok`` means "queued" and arrives long before the move runs. With several MOVEs in
         flight a refused one could be followed by an accepted one, and the trajectory would run out of order.
         """
-        give_up_at = time.monotonic() + self._settings.queue_full_timeout_s
+        give_up_at = self._clock() + self._settings.queue_full_timeout_s
         while True:
             request = self._submit(command)
             try:
@@ -603,7 +608,7 @@ class RobotCommander:
             except CommandFailedError as exc:
                 if exc.code is not ErrorCode.QUEUE_FULL:
                     raise
-                if time.monotonic() >= give_up_at:
+                if self._clock() >= give_up_at:
                     raise
                 self._settle(self._settings.queue_retry_s, epoch)
                 continue
@@ -644,17 +649,17 @@ class RobotCommander:
                 raise alarm
 
     def _wait_for(self, predicate: Callable[[], bool], timeout_s: float, epoch: int, what: str) -> None:
-        deadline = time.monotonic() + timeout_s
+        deadline = self._clock() + timeout_s
         with self._cond:
             while True:
                 if (alarm := self._alarm_since(epoch)) is not None:
                     raise alarm
                 if predicate():
                     return
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._clock()
                 if remaining <= 0:
                     raise ReplyTimeoutError(f"no {what} within {timeout_s:g} s")
-                self._cond.wait(remaining)
+                self._cond.wait(min(remaining, _CLOCK_POLL_S))
 
     def _wait_ok(self, request: _Request, epoch: int) -> _Request:
         self._wait_for(lambda: request.answered, self._settings.reply_timeout_s, epoch, f"reply to {request.command.name}")
@@ -675,13 +680,13 @@ class RobotCommander:
         return request
 
     def _settle(self, seconds: float, epoch: int) -> None:
-        deadline = time.monotonic() + seconds
+        deadline = self._clock() + seconds
         with self._cond:
             while (alarm := self._alarm_since(epoch)) is None:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._clock()
                 if remaining <= 0:
                     return
-                self._cond.wait(remaining)
+                self._cond.wait(min(remaining, _CLOCK_POLL_S))
             raise alarm
 
     def _best_effort_estop(self) -> None:
@@ -695,11 +700,14 @@ class RobotCommander:
     # ------------------------------------------------------------------ #
 
     def _ping_loop(self) -> None:
-        while True:
-            if self._link.state is LinkState.CONNECTED:
-                self._ping_once()
-            if self._ping_stop.wait(self._settings.ping_interval_s):
-                return
+        next_at = self._clock()
+        while not self._ping_stop.is_set():
+            now = self._clock()
+            if now >= next_at:
+                next_at = now + self._settings.ping_interval_s  # from when this PING starts: the rate does not drift
+                if self._link.state is LinkState.CONNECTED:
+                    self._ping_once()
+            self._ping_stop.wait(min(self._settings.ping_interval_s, _CLOCK_POLL_S))
 
     def _ping_once(self) -> None:
         try:
@@ -707,13 +715,13 @@ class RobotCommander:
         except CommanderError as exc:
             logger.debug("PING not sent: %s", exc)
             return
-        deadline = time.monotonic() + self._settings.reply_timeout_s
+        deadline = self._clock() + self._settings.reply_timeout_s
         with self._cond:
             while not request.answered:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._clock()
                 if remaining <= 0:
                     break
-                self._cond.wait(remaining)
+                self._cond.wait(min(remaining, _CLOCK_POLL_S))
             alive = request.answered  # even error:N proves the ESP32 is listening
         self._forget(request)
         if alive:
