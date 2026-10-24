@@ -316,7 +316,7 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 
 ### 10.2 Mandatory requirements
 
-- **Boot:** configure the three ENA pins at the very start of setup(). After reset the pins float, so drivers are enabled, which is intentional so the motors hold position. Emit no pulses before a command arrives.
+- **Boot:** at the very start of setup(), drive the two TB6600 ENA pins HIGH (driver enabled, so the joints hold position; floating pins also enable the drivers) and drive the Z motor pins (L298 ENA, IN1, IN2) LOW so Z is off. Emit no pulses before a command arrives.
 - **FastAccelStepper:** `setEnablePin(pin, false)` and `setAutoEnable(false)`; enable/disable only through ENABLE / DISABLE. Check function names against the library version in use. The DIR opto is slow, so set a direction-change delay as the TB6600 requires.
 - **PWM:** LEDC for the Z motor (about 10 kHz) and the servo (50 Hz) use separate channels and timers that do not collide.
 - **Z axis:** ZUP runs until limit #1 triggers; ZDOWN runs until limit #2 triggers. A limit switch stops the motor inside the interrupt (PWM = 0, brake). Moderate PWM, ramped up, eased near the end of travel. On timeout stop and send `!alarm:Z_TIMEOUT`. `LIMIT_Z` when both switches are active, or when Z is at TOP and the top switch releases without a command.
