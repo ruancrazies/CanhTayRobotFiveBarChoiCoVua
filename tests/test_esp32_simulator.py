@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from config.protocol_commands import PROTOCOL_VERSION, AlarmCode, ErrorCode
+from config.protocol_commands import COMMAND_ORDER, COMMANDS, PROTOCOL_VERSION, AlarmCode, ErrorCode
 from desktop_app.hardware.esp32_simulator import Esp32Simulator, SimConfig
 from desktop_app.hardware.serial_link import ConnectionLost
 from desktop_app.utils.hardware_config import load_hardware_config
@@ -454,12 +454,171 @@ def test_estop_drops_the_dones_that_were_owed() -> None:
 
 @pytest.mark.parametrize(
     "line",
-    ["HOME", "MOVE A=160 B=40 F=20", "ZUP", "ZDOWN", "ACCEL S=1", "GRIP S=1", "ENABLE", "DISABLE", "WAIT"],
+    ["HOME", "MOVE A=160 B=40 F=20", "ZUP", "ZDOWN", "ACCEL S=1", "GRIP S=1", "ENABLE", "WAIT"],
 )
 def test_in_estop_everything_but_the_safe_commands_is_error_5(line: str) -> None:
     bench = Bench()
     bench.send("ESTOP")
     assert bench.send(line) == ["error:5"]
+
+
+# The owner's ESTOP rules (SPEC 5.1 / 10.2), typed out here and NOT taken from the declaration the simulator uses.
+ACCEPTED_IN_ESTOP = {"ZSTOP", "DISABLE", "POS", "INFO", "PING", "ESTOP", "RESET"}
+
+
+def _line_for(name: str) -> str:
+    """A valid line for ``name``: every required parameter given the value 1."""
+    return " ".join([name, *(f"{p.name}=1" for p in COMMANDS[name].params if p.required)])
+
+
+@pytest.mark.parametrize("name", list(COMMAND_ORDER))
+def test_in_estop_a_command_is_gated_exactly_by_the_owner_set(name: str) -> None:
+    """Every command of the protocol, one by one, in a fresh ESTOP: error:5 if and only if it is outside the set."""
+    bench = Bench()
+    bench.send("ESTOP")
+    reply = bench.send(_line_for(name))
+    if name in ACCEPTED_IN_ESTOP:
+        assert "error:5" not in reply, f"{name} must still work in an ESTOP, got {reply}"
+        assert reply, f"{name} gave no answer"
+    else:
+        assert reply == ["error:5"], f"{name} must be refused in an ESTOP, got {reply}"
+
+
+def test_the_estop_set_and_its_complement_cover_every_command() -> None:
+    assert ACCEPTED_IN_ESTOP < set(COMMAND_ORDER)
+    assert set(COMMAND_ORDER) - ACCEPTED_IN_ESTOP == {"HOME", "MOVE", "ZUP", "ZDOWN", "ACCEL", "GRIP", "ENABLE", "WAIT"}
+
+
+def test_in_estop_the_accepted_commands_answer_as_usual() -> None:
+    bench = Bench()
+    bench.send("ESTOP")
+    assert bench.send("PING") == ["ok"]
+    assert bench.send("INFO") == [f"INFO FW=sim PROTO={PROTOCOL_VERSION}", "ok"]
+    assert bench.send("ZSTOP") == ["ok"]
+    assert bench.send("DISABLE") == ["ok"]
+    assert bench.pos()["Z"] == "TOP"
+    assert bench.send("ESTOP") == ["!alarm:ESTOP"]
+    assert bench.send("RESET") == ["ok"]
+
+
+def test_parse_errors_come_before_the_estop_check() -> None:
+    bench = Bench()
+    bench.send("ESTOP")
+    assert bench.send("FOO") == ["error:1"]
+    assert bench.send("MOVE A=1") == ["error:2"]
+    assert bench.send("ENABLE now") == ["error:2"]  # a bad parameter on a refused command is still error:2
+
+
+# --------------------------------------------------------------------------- #
+# ENABLE / DISABLE and the ESTOP (owner decisions 1 to 3)
+# --------------------------------------------------------------------------- #
+
+
+def test_disable_is_accepted_in_estop_and_frees_the_drivers() -> None:
+    bench = Bench()
+    bench.send("ESTOP")
+    assert bench.sim.drivers_enabled
+    assert bench.send("DISABLE") == ["ok"]
+    assert not bench.sim.drivers_enabled
+    assert bench.sim.estop  # DISABLE does not leave the ESTOP
+
+
+def test_enable_is_refused_in_estop_and_accepted_again_after_reset() -> None:
+    bench = Bench()
+    bench.send("DISABLE")
+    bench.send("ESTOP")
+    assert bench.send("ENABLE") == ["error:5"]
+    assert not bench.sim.drivers_enabled  # the refused ENABLE changed nothing
+    assert bench.send("RESET") == ["ok"]
+    assert not bench.sim.estop
+    assert bench.send("ENABLE") == ["ok"]
+    assert bench.sim.drivers_enabled
+
+
+def test_reset_leaves_the_drivers_as_they_are() -> None:
+    bench = Bench()
+    bench.send("DISABLE")
+    bench.send("ESTOP")
+    bench.send("RESET")
+    assert not bench.sim.drivers_enabled
+    bench2 = Bench()
+    bench2.send("ESTOP")
+    bench2.send("RESET")
+    assert bench2.sim.drivers_enabled
+
+
+def test_disable_clears_the_homed_flag_and_enable_does_not_restore_it() -> None:
+    bench = Bench()
+    bench.home()
+    assert bench.send(MOVE_10) == ["ok"]  # homed: a MOVE is accepted
+    bench.advance(5.0)
+    assert bench.send("DISABLE") == ["ok"]
+    assert not bench.sim.homed
+    assert bench.send(MOVE_10) == ["error:4"]
+    assert bench.send("ENABLE") == ["ok"]
+    assert not bench.sim.homed
+    assert bench.send(MOVE_10) == ["error:4"]  # ENABLE does not give the homing back
+    bench.home()
+    assert bench.send(MOVE_10) == ["ok"]  # only a new homing does
+
+
+def test_disable_in_an_estop_leaves_homing_mandatory() -> None:
+    bench = Bench()
+    bench.home()
+    bench.send("ESTOP")
+    bench.send("DISABLE")
+    bench.send("RESET")
+    assert not bench.sim.homed
+    assert bench.send("ENABLE") == ["ok"]
+    assert bench.send(MOVE_10) == ["error:4"]
+
+
+def test_disable_aborts_a_homing_that_still_needs_the_joints() -> None:
+    """A homing running when the drivers go off must not set the homed flag when it ends, and sends no done."""
+    # Z travel is 1.0 s and the joint phase 0.5 s (test values). From BOTTOM, 0.5 s is Z still rising and 1.2 s is
+    # the joint phase running; from TOP the Z phase is instant, so 0.2 s is the joint phase too.
+    for initial_z, advance_s in (("BOTTOM", 0.5), ("BOTTOM", 1.2), ("TOP", 0.2)):
+        bench = Bench(initial_z=initial_z)
+        assert bench.send("HOME") == ["ok"]
+        assert bench.advance(advance_s) == []
+        assert bench.send("DISABLE") == ["ok"]
+        assert bench.advance(10.0) == [], f"an aborted homing must never send done ({initial_z}, {advance_s} s)"
+        assert not bench.sim.homed
+        assert bench.send(MOVE_10) == ["error:4"]
+
+
+def test_disable_does_not_stop_a_z_only_homing_because_z_needs_no_driver() -> None:
+    bench = Bench(initial_z="BOTTOM")
+    assert bench.send("HOME Z") == ["ok"]
+    bench.advance(0.5)
+    assert bench.send("DISABLE") == ["ok"]
+    assert bench.advance(5.0) == ["done"]
+    assert bench.pos()["Z"] == "TOP"
+    assert not bench.sim.homed  # the joints were never homed, and DISABLE cleared the flag
+
+
+def test_a_repeated_estop_is_accepted_and_harmless() -> None:
+    bench = Bench()
+    bench.home()
+    bench.send("MOVE A=170 B=40 F=20")
+    bench.advance(0.5)
+    assert bench.send("ESTOP") == ["!alarm:ESTOP"]
+
+    def snapshot() -> tuple:
+        return (bench.sim.estop, bench.sim.alarms, bench.sim.homed, bench.sim.joint_deg, bench.sim.queue_length,
+                bench.sim.drivers_enabled, bench.sim.z_state)
+
+    first = snapshot()
+    assert bench.send("ESTOP") == ["!alarm:ESTOP"]  # accepted, answered like the first one
+    assert snapshot() == first
+    assert bench.advance(10.0) == []
+    assert bench.send("DISABLE") == ["ok"]
+    after_disable = snapshot()
+    assert bench.send("ESTOP") == ["!alarm:ESTOP"]
+    assert snapshot() == after_disable  # a repeated ESTOP never re-enables the drivers
+    assert not bench.sim.drivers_enabled
+    assert bench.send("RESET") == ["ok"]  # one RESET is enough
+    assert not bench.sim.estop and bench.sim.alarms == ()
 
 
 def test_in_estop_the_safe_commands_still_work() -> None:

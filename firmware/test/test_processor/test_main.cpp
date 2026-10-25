@@ -11,6 +11,14 @@
 using chessbot::CommandProcessor;
 namespace protocol = chessbot::protocol;
 
+// CommandProcessor declares this a friend. Stage 4a has no HOME that could set the homed flags, so the test
+// presets them here to see what the commands do to a homed device.
+namespace chessbot {
+struct CommandProcessorTestPeer {
+  static DeviceState& state(CommandProcessor& processor) { return processor.state_; }
+};
+}  // namespace chessbot
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -137,14 +145,169 @@ void test_estop_empties_the_queue() {
   TEST_ASSERT_TRUE(bench.processor.queue().empty());
 }
 
-void test_in_estop_the_motion_and_driver_commands_are_error_5() {
+void test_in_estop_the_motion_commands_and_enable_are_error_5() {
   Bench bench;
   bench.send("ESTOP");
-  const char* refused[] = {"HOME", "HOME Z", "MOVE A=1 B=2 F=3", "ZUP", "ZDOWN", "ACCEL S=1", "GRIP S=90", "ENABLE", "DISABLE", "WAIT"};
+  const char* refused[] = {"HOME", "HOME Z", "MOVE A=1 B=2 F=3", "ZUP", "ZDOWN", "ACCEL S=1", "GRIP S=90", "ENABLE", "WAIT"};
   for (const char* line : refused) {
     expect(bench.send(line), {"error:5"}, line);
   }
-  TEST_ASSERT_TRUE(bench.hardware.driver_calls.empty());  // DISABLE did not reach the pins
+  TEST_ASSERT_TRUE(bench.hardware.driver_calls.empty());  // the refused ENABLE did not reach the pins
+}
+
+// ---- the ESTOP rules (owner decisions, SPEC 5.1 / 10.2) ------------------------------------------
+// The two lists below are typed out on purpose: they are NOT taken from protocol.h, which the code under test
+// uses, so the test cannot agree with the code by construction. tests/test_protocol_declaration.py ties
+// protocol.h to the SPEC text and to the Python declaration.
+
+namespace {
+
+struct EstopCase {
+  const char* name;  // the command word
+  const char* line;  // a valid line for it
+};
+
+const EstopCase kAcceptedInEstop[] = {
+    {"ZSTOP", "ZSTOP"}, {"DISABLE", "DISABLE"}, {"POS", "POS"}, {"INFO", "INFO"},
+    {"PING", "PING"},   {"ESTOP", "ESTOP"},     {"RESET", "RESET"},
+};
+const EstopCase kRefusedInEstop[] = {
+    {"HOME", "HOME"},         {"MOVE", "MOVE A=1 B=2 F=3"}, {"ZUP", "ZUP"},       {"ZDOWN", "ZDOWN"},
+    {"ACCEL", "ACCEL S=1"},   {"GRIP", "GRIP S=90"},        {"ENABLE", "ENABLE"}, {"WAIT", "WAIT"},
+};
+
+bool listed(const EstopCase* cases, size_t count, const char* name) {
+  for (size_t i = 0; i < count; ++i) {
+    if (std::string(cases[i].name) == name) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+void test_the_two_estop_lists_cover_every_command_of_the_protocol_exactly_once() {
+  const size_t accepted = sizeof(kAcceptedInEstop) / sizeof(kAcceptedInEstop[0]);
+  const size_t refused = sizeof(kRefusedInEstop) / sizeof(kRefusedInEstop[0]);
+  TEST_ASSERT_EQUAL_INT(protocol::kCommandCount, accepted + refused);
+  for (uint8_t c = 0; c < protocol::kCommandCount; ++c) {
+    const char* name = protocol::kCommands[c].name;
+    const bool in_accepted = listed(kAcceptedInEstop, accepted, name);
+    const bool in_refused = listed(kRefusedInEstop, refused, name);
+    if (in_accepted == in_refused) TEST_FAIL_MESSAGE(name);  // in both lists, or in neither
+  }
+}
+
+void test_in_estop_every_command_outside_the_set_is_error_5() {
+  for (const EstopCase& item : kRefusedInEstop) {
+    Bench bench;
+    bench.send("ESTOP");
+    expect(bench.send(item.line), {"error:5"}, item.line);
+  }
+}
+
+void test_in_estop_every_command_in_the_set_is_accepted_and_none_is_error_5() {
+  const std::string info = std::string("INFO FW=") + chessbot::config::kFirmwareVersion + " PROTO=" + std::to_string(protocol::kProtocolVersion);
+  for (const EstopCase& item : kAcceptedInEstop) {
+    Bench bench;
+    bench.send("ESTOP");
+    const std::vector<std::string> reply = bench.send(item.line);
+    for (const std::string& line : reply) {
+      if (line == "error:5") TEST_FAIL_MESSAGE(item.line);
+    }
+    const std::string name = item.name;
+    if (name == "PING" || name == "DISABLE" || name == "RESET") {
+      expect(reply, {"ok"}, item.line);
+    } else if (name == "ESTOP") {
+      expect(reply, {"!alarm:ESTOP"}, item.line);
+    } else if (name == "INFO") {
+      expect(reply, {info.c_str(), "ok"}, item.line);
+    } else {
+      // ZSTOP and POS are in the set but are stubs in stage 4a: they get past the ESTOP check and answer error:1.
+      expect(reply, {"error:1"}, item.line);
+    }
+  }
+}
+
+void test_disable_is_accepted_in_estop_and_reaches_the_pins() {
+  Bench bench;
+  bench.send("ESTOP");
+  expect(bench.send("DISABLE"), {"ok"}, "DISABLE in ESTOP");
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.driver_calls.size());
+  TEST_ASSERT_TRUE(!bench.hardware.driver_calls[0]);
+  TEST_ASSERT_TRUE(!bench.processor.state().drivers_enabled());
+  TEST_ASSERT_TRUE(bench.processor.state().estop());  // DISABLE does not leave the ESTOP
+}
+
+void test_enable_is_refused_in_estop_and_accepted_again_after_reset() {
+  Bench bench;
+  bench.send("DISABLE");
+  bench.send("ESTOP");
+  expect(bench.send("ENABLE"), {"error:5"}, "ENABLE in ESTOP");
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.driver_calls.size());  // only the first DISABLE: ENABLE never reached the pins
+  TEST_ASSERT_TRUE(!bench.processor.state().drivers_enabled());
+  expect(bench.send("RESET"), {"ok"}, "RESET");
+  TEST_ASSERT_TRUE(!bench.processor.state().estop());
+  expect(bench.send("ENABLE"), {"ok"}, "ENABLE after RESET");
+  TEST_ASSERT_EQUAL_INT(2, bench.hardware.driver_calls.size());
+  TEST_ASSERT_TRUE(bench.hardware.driver_calls[1]);
+  TEST_ASSERT_TRUE(bench.processor.state().drivers_enabled());
+}
+
+void test_a_repeated_estop_is_accepted_and_harmless() {
+  Bench bench;
+  bench.send("DISABLE");
+  expect(bench.send("ESTOP"), {"!alarm:ESTOP"}, "first ESTOP");
+  for (int i = 0; i < 3; ++i) {
+    expect(bench.send("ESTOP"), {"!alarm:ESTOP"}, "repeated ESTOP");
+  }
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.driver_calls.size());  // the ENA pins were not touched again
+  TEST_ASSERT_TRUE(!bench.processor.state().drivers_enabled());  // and the drivers did not come back
+  TEST_ASSERT_TRUE(bench.processor.state().estop());
+  TEST_ASSERT_TRUE(bench.processor.state().alarm_latched(protocol::AlarmCode::kESTOP));
+  TEST_ASSERT_TRUE(!bench.processor.state().alarm_latched(protocol::AlarmCode::kHB_TIMEOUT));
+  TEST_ASSERT_TRUE(!bench.processor.state().homed());
+  TEST_ASSERT_TRUE(bench.processor.queue().empty());
+  expect(bench.send("RESET"), {"ok"}, "one RESET is enough");
+  TEST_ASSERT_TRUE(!bench.processor.state().estop());
+  TEST_ASSERT_TRUE(!bench.processor.state().any_alarm());
+}
+
+void test_disable_clears_the_homed_flag_and_enable_does_not_restore_it() {
+  Bench bench;
+  chessbot::DeviceState& state = chessbot::CommandProcessorTestPeer::state(bench.processor);
+  state.set_homed_z(true);
+  state.set_homed_joints(true);
+  TEST_ASSERT_TRUE(bench.processor.state().homed());
+  expect(bench.send("DISABLE"), {"ok"}, "DISABLE");
+  TEST_ASSERT_TRUE(!bench.processor.state().homed_z());
+  TEST_ASSERT_TRUE(!bench.processor.state().homed_joints());
+  expect(bench.send("ENABLE"), {"ok"}, "ENABLE");
+  TEST_ASSERT_TRUE(!bench.processor.state().homed());  // only a new homing sets it again
+}
+
+void test_commands_other_than_disable_leave_the_homed_flag_alone() {
+  Bench bench;
+  chessbot::DeviceState& state = chessbot::CommandProcessorTestPeer::state(bench.processor);
+  state.set_homed_z(true);
+  state.set_homed_joints(true);
+  bench.send("PING");
+  bench.send("INFO");
+  bench.send("ENABLE");  // the drivers are already enabled at power-up
+  bench.send("FOO");
+  TEST_ASSERT_TRUE(bench.processor.state().homed());
+}
+
+void test_disable_in_estop_keeps_homing_mandatory() {
+  Bench bench;
+  chessbot::DeviceState& state = chessbot::CommandProcessorTestPeer::state(bench.processor);
+  state.set_homed_z(true);
+  state.set_homed_joints(true);
+  bench.send("ESTOP");
+  bench.send("DISABLE");
+  bench.send("RESET");
+  TEST_ASSERT_TRUE(!bench.processor.state().homed());
+  bench.send("ENABLE");
+  TEST_ASSERT_TRUE(!bench.processor.state().homed());
 }
 
 void test_in_estop_ping_info_and_estop_still_work() {
@@ -344,7 +507,16 @@ int main(int, char**) {
   RUN_TEST(test_estop_stops_motion_sets_the_flag_and_keeps_the_drivers_enabled);
   RUN_TEST(test_estop_is_idempotent_and_answers_the_alarm_again);
   RUN_TEST(test_estop_empties_the_queue);
-  RUN_TEST(test_in_estop_the_motion_and_driver_commands_are_error_5);
+  RUN_TEST(test_in_estop_the_motion_commands_and_enable_are_error_5);
+  RUN_TEST(test_the_two_estop_lists_cover_every_command_of_the_protocol_exactly_once);
+  RUN_TEST(test_in_estop_every_command_outside_the_set_is_error_5);
+  RUN_TEST(test_in_estop_every_command_in_the_set_is_accepted_and_none_is_error_5);
+  RUN_TEST(test_disable_is_accepted_in_estop_and_reaches_the_pins);
+  RUN_TEST(test_enable_is_refused_in_estop_and_accepted_again_after_reset);
+  RUN_TEST(test_a_repeated_estop_is_accepted_and_harmless);
+  RUN_TEST(test_disable_clears_the_homed_flag_and_enable_does_not_restore_it);
+  RUN_TEST(test_commands_other_than_disable_leave_the_homed_flag_alone);
+  RUN_TEST(test_disable_in_estop_keeps_homing_mandatory);
   RUN_TEST(test_in_estop_ping_info_and_estop_still_work);
   RUN_TEST(test_in_estop_parse_errors_come_before_error_5);
   RUN_TEST(test_in_estop_the_stubbed_safe_commands_are_still_error_1);

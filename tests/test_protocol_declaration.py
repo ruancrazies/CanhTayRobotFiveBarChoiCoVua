@@ -18,7 +18,19 @@ import pytest
 import yaml
 
 from config import protocol_commands as declaration
-from config.protocol_commands import COMMAND_ORDER, COMMANDS, AlarmCode, ErrorCode, declaration_as_dict
+from config.protocol_commands import (
+    ACCEPTED_IN_ESTOP,
+    COMMAND_ORDER,
+    COMMANDS,
+    AlarmCode,
+    CommandSpec,
+    ErrorCode,
+    declaration_as_dict,
+)
+
+# The owner's decision (SPEC 5.1 and 10.2), typed out here on purpose so that it is not derived from the very
+# declaration it is checked against. In the order of the SPEC 5.1 table.
+OWNER_ESTOP_SET = ("ZSTOP", "DISABLE", "POS", "INFO", "PING", "ESTOP", "RESET")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEC = REPO_ROOT / "docs" / "SPEC.md"
@@ -100,6 +112,51 @@ def test_completion_matches_the_spec_response_column() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# The ESTOP rules (SPEC 5.1, 5.2, 10.2)
+# --------------------------------------------------------------------------- #
+
+
+def _estop_set_in(section: str, pattern: str) -> list[str]:
+    match = re.search(pattern, spec_section(section), re.S)
+    assert match, f"SPEC {section} does not state which commands are accepted in an ESTOP"
+    return re.findall(r"\b[A-Z]{2,}\b", match.group(1))
+
+
+def test_the_declared_estop_set_is_the_owner_decision() -> None:
+    assert ACCEPTED_IN_ESTOP == OWNER_ESTOP_SET
+    assert [name for name in COMMAND_ORDER if COMMANDS[name].accepted_in_estop] == list(ACCEPTED_IN_ESTOP)
+    assert "ENABLE" not in ACCEPTED_IN_ESTOP  # refused in an ESTOP until RESET
+    assert "DISABLE" in ACCEPTED_IN_ESTOP  # accepted in an ESTOP
+    assert set(ACCEPTED_IN_ESTOP) < set(COMMANDS)
+
+
+def test_a_command_nobody_listed_is_refused_in_an_estop() -> None:
+    assert CommandSpec("NEW", (), "a future command").accepted_in_estop is False
+
+
+def test_the_spec_5_1_names_the_same_estop_set() -> None:
+    names = _estop_set_in("5.1", r"\*\*While the ESTOP flag is set\*\* only (.+?) are accepted\.")
+    assert sorted(names) == sorted(ACCEPTED_IN_ESTOP)
+    assert "Every other command, including ENABLE, is answered `error:5`; ENABLE works again after RESET." in spec_section("5.1")
+
+
+def test_the_spec_10_2_names_the_same_estop_set() -> None:
+    names = _estop_set_in("10.2", r"While the flag is set only (.+?) are accepted;")
+    assert sorted(names) == sorted(ACCEPTED_IN_ESTOP)
+
+
+def test_the_spec_says_disable_clears_the_homed_flag_and_estop_may_repeat() -> None:
+    table = spec_section("5.1")
+    disable_row = next(row for row in table.splitlines() if row.startswith("| ENABLE / DISABLE"))
+    assert "DISABLE also clears the homed flag" in disable_row
+    estop_row = next(row for row in table.splitlines() if row.startswith("| ESTOP"))
+    assert "while already in ESTOP" in estop_row and "!alarm:ESTOP" in estop_row
+    assert "A repeated ESTOP while already in ESTOP is accepted and harmless" in table
+    assert "DISABLE clears the homed flag, so homing is mandatory after it" in spec_section("10.2")
+    assert "After DISABLE, homing is mandatory" in spec_section("5.3")
+
+
+# --------------------------------------------------------------------------- #
 # The declaration is internally consistent and holds no hardware value
 # --------------------------------------------------------------------------- #
 
@@ -112,6 +169,7 @@ def test_declaration_is_plain_serialisable_data() -> None:
     assert list(data["commands"]) == list(COMMAND_ORDER)
     assert data["error_codes"] == {"UNRECOGNIZED": 1, "BAD_PARAMETER": 2, "QUEUE_FULL": 3, "NOT_HOMED": 4, "IN_ESTOP": 5}
     assert data["alarm_codes"] == ["ESTOP", "LIMIT_Z", "Z_TIMEOUT", "SENSOR_FAULT", "STEP_LOSS", "HB_TIMEOUT"]
+    assert data["accepted_in_estop"] == list(OWNER_ESTOP_SET)
 
 
 def test_every_data_line_named_by_a_command_is_declared() -> None:
@@ -238,6 +296,7 @@ def header_declaration(text: str) -> dict[str, object]:
         "error_codes": {name: int(number) for name, number in _macro_rows(text, "CB_ERROR_CODES")},
         "alarm_codes": [row[0] for row in _macro_rows(text, "CB_ALARM_CODES")],
         "z_states": [row[0] for row in _macro_rows(text, "CB_Z_STATES")],
+        "accepted_in_estop": [row[0] for row in _macro_rows(text, "CB_ESTOP_ACCEPTED")],
         "commands": commands,
         "data_lines": data_lines,
         "max_params_per_command": int(_constant(text, "kMaxParamsPerCommand")),
@@ -275,6 +334,7 @@ def comparable_declaration() -> dict[str, object]:
         "error_codes": data["error_codes"],
         "alarm_codes": data["alarm_codes"],
         "z_states": data["z_states"],
+        "accepted_in_estop": data["accepted_in_estop"],
         "commands": commands,
         "data_lines": {
             name: [(f["name"], f["kind"].upper()) for f in fields] for name, fields in data["data_lines"].items()
@@ -306,6 +366,12 @@ def test_protocol_h_alarm_codes_match_in_order(header_text: str) -> None:
 
 def test_protocol_h_z_states_match(header_text: str) -> None:
     assert header_declaration(header_text)["z_states"] == comparable_declaration()["z_states"]
+
+
+def test_protocol_h_estop_set_matches_the_declaration_and_the_owner_decision(header_text: str) -> None:
+    header = header_declaration(header_text)
+    assert header["accepted_in_estop"] == list(ACCEPTED_IN_ESTOP) == list(OWNER_ESTOP_SET)
+    assert all(name in header["commands"] for name in header["accepted_in_estop"])  # type: ignore[operator]
 
 
 def test_protocol_h_wire_words_and_version_match(header_text: str) -> None:
@@ -355,6 +421,9 @@ def test_protocol_h_matches_the_declaration_as_a_whole(header_text: str) -> None
         ("constexpr int kProtocolVersion = 1;", "constexpr int kProtocolVersion = 2;"),
         ('constexpr char kErrorPrefix[] = "error:";', 'constexpr char kErrorPrefix[] = "err:";'),
         ("X(PING, NONE, OK, NONE)", "X(PINGS, NONE, OK, NONE)"),  # a command name
+        ("X(DISABLE)", "X(ENABLE)"),  # the ESTOP set with the old/wrong member: ENABLE accepted, DISABLE refused
+        ("X(ZSTOP)", "X(ZSTOPS)"),  # a name in the ESTOP set
+        ("  X(RESET)\n", "  X(RESET) \\\n  X(ENABLE)\n"),  # one command too many at the end of the ESTOP set
     ],
 )
 def test_the_cross_check_detects_a_wrong_header(header_text: str, old: str, new: str) -> None:

@@ -111,7 +111,7 @@ void test_a_session_gets_the_exact_replies() {
   boot_once();
   host_arduino::log().clear();
   Serial.tx.clear();
-  Serial.type("INFO\nPING\r\nENABLE\nDISABLE\nENABLE\nESTOP\nMOVE A=1 B=2 F=3\nDISABLE\nPING\nRESET\nFOO\nPING x\nPOS\n\n   \n");
+  Serial.type("INFO\nPING\r\nENABLE\nDISABLE\nENABLE\nESTOP\nMOVE A=1 B=2 F=3\nENABLE\nDISABLE\nESTOP\nPING\nRESET\nENABLE\nFOO\nPING x\nPOS\n\n   \n");
   loop();
   const std::string expected =
       std::string("INFO FW=") + chessbot::config::kFirmwareVersion + " PROTO=" + std::to_string(chessbot::protocol::kProtocolVersion) + "\n"
@@ -122,9 +122,12 @@ void test_a_session_gets_the_exact_replies() {
       "ok\n"          // ENABLE
       "!alarm:ESTOP\n"
       "error:5\n"     // MOVE in ESTOP
-      "error:5\n"     // DISABLE in ESTOP
+      "error:5\n"     // ENABLE in ESTOP
+      "ok\n"          // DISABLE in ESTOP
+      "!alarm:ESTOP\n"  // a repeated ESTOP in ESTOP: accepted, answered again
       "ok\n"          // PING in ESTOP
       "ok\n"          // RESET
+      "ok\n"          // ENABLE after RESET
       "error:1\n"     // FOO
       "error:2\n"     // PING x
       "error:1\n";    // POS: not implemented in 4a
@@ -153,6 +156,40 @@ void test_the_ena_pins_follow_enable_and_disable_and_estop_never_touches_them() 
   }
   Serial.type("RESET\n");
   loop();
+}
+
+void test_in_an_estop_disable_drives_the_ena_pins_low_and_enable_does_not_touch_them() {
+  boot_once();
+  Serial.type("ENABLE\nESTOP\n");  // a known start: drivers enabled, in an ESTOP
+  loop();
+  host_arduino::log().clear();
+  Serial.tx.clear();
+  Serial.type("ENABLE\n");  // refused: error:5 and not one pin write
+  loop();
+  TEST_ASSERT_EQUAL_STRING("error:5\n", Serial.tx.c_str());
+  TEST_ASSERT_TRUE(host_arduino::log().empty());
+  Serial.tx.clear();
+  Serial.type("DISABLE\n");  // accepted in an ESTOP: both ENA pins LOW
+  loop();
+  TEST_ASSERT_EQUAL_STRING("ok\n", Serial.tx.c_str());
+  TEST_ASSERT_EQUAL_STRING(w(kTb6600Ena1, LOW).c_str(), host_arduino::log().at(0).c_str());
+  TEST_ASSERT_EQUAL_STRING(w(kTb6600Ena2, LOW).c_str(), host_arduino::log().at(2).c_str());
+  host_arduino::log().clear();
+  Serial.tx.clear();
+  Serial.type("ESTOP\n");  // repeated: the alarm again and no pin write, the drivers stay disabled
+  loop();
+  TEST_ASSERT_EQUAL_STRING("!alarm:ESTOP\n", Serial.tx.c_str());
+  for (const std::string& event : host_arduino::log()) {
+    TEST_ASSERT_TRUE(event.find(" " + std::to_string(kTb6600Ena1) + " ") == std::string::npos);
+    TEST_ASSERT_TRUE(event.find(" " + std::to_string(kTb6600Ena2) + " ") == std::string::npos);
+  }
+  host_arduino::log().clear();
+  Serial.tx.clear();
+  Serial.type("RESET\nENABLE\n");  // ENABLE works again after RESET, and leaves the device enabled for later tests
+  loop();
+  TEST_ASSERT_EQUAL_STRING("ok\nok\n", Serial.tx.c_str());
+  TEST_ASSERT_TRUE(index_of(host_arduino::log(), w(kTb6600Ena1, HIGH)) < host_arduino::log().size());
+  TEST_ASSERT_TRUE(index_of(host_arduino::log(), w(kTb6600Ena2, HIGH)) < host_arduino::log().size());
 }
 
 void test_an_overlong_line_gets_one_error_1_and_the_next_line_still_works() {
@@ -194,6 +231,7 @@ int main(int, char**) {
   RUN_TEST(test_nothing_is_sent_at_boot_and_only_the_five_pins_are_touched);
   RUN_TEST(test_a_session_gets_the_exact_replies);
   RUN_TEST(test_the_ena_pins_follow_enable_and_disable_and_estop_never_touches_them);
+  RUN_TEST(test_in_an_estop_disable_drives_the_ena_pins_low_and_enable_does_not_touch_them);
   RUN_TEST(test_an_overlong_line_gets_one_error_1_and_the_next_line_still_works);
   RUN_TEST(test_a_line_split_across_loop_calls_is_reassembled);
   RUN_TEST(test_no_heartbeat_alarm_is_sent_in_stage_4a);
