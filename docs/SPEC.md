@@ -127,7 +127,7 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 | ZSTOP | Stop and brake Z immediately | ok |
 | ACCEL S=<deg/s²> | Acceleration for following segments | ok |
 | GRIP S=<0–180> | Gripper servo angle | ok |
-| ENABLE / DISABLE | Enable / disable both TB6600 drivers | ok |
+| ENABLE / DISABLE | Enable / disable both TB6600 drivers. DISABLE clears the homed flag, so homing is mandatory afterwards | ok |
 | WAIT | Wait for the motion queue to drain | ok, then done |
 | POS | Commanded angles, AS5600 angles, steps issued, Z state (TOP / BOTTOM / MID) | one line, then ok |
 | INFO | Firmware and protocol version | one line, then ok |
@@ -139,7 +139,7 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 
 - `ok`: valid command accepted and queued.
 - `done`: motion queue finished (after HOME or WAIT).
-- `error:<code>`: 1 unrecognized; 2 missing or out-of-range parameter; 3 queue full; 4 not homed; 5 in ESTOP.
+- `error:<code>`: 1 unrecognized; 2 missing or out-of-range parameter; 3 queue full; 4 not homed; 5 in ESTOP (while in ESTOP only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted; every other command gets error:5).
 - `!alarm:<code>` sent asynchronously: `ESTOP`, `LIMIT_Z` (both Z switches active, or Z at TOP with the top switch released without a command), `Z_TIMEOUT`, `SENSOR_FAULT`; plus `STEP_LOSS` and `HB_TIMEOUT` (proposed).
 
 ### 5.3 Rules for the PC side
@@ -321,7 +321,7 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 - **PWM:** LEDC for the Z motor (about 10 kHz) and the servo (50 Hz) use separate channels and timers that do not collide.
 - **Z axis:** ZUP runs until limit #1 triggers; ZDOWN runs until limit #2 triggers. A limit switch stops the motor inside the interrupt (PWM = 0, brake). Moderate PWM, ramped up, eased near the end of travel. On timeout stop and send `!alarm:Z_TIMEOUT`. `LIMIT_Z` when both switches are active, or when Z is at TOP and the top switch releases without a command.
 - **Heartbeat:** if PING is missing beyond the threshold, decelerate both joints in a controlled way, stop and brake Z, **keep drivers enabled** (releasing the motors can collapse the arm and drop Z), wait for the PC to reconnect and re-home.
-- **ESTOP:** stop joint pulses (short deceleration if moving fast; stop at once if triggered by a hardware button or LIMIT_Z), stop and brake Z, keep drivers enabled, set the ESTOP flag. DISABLE only when the user commands a shutdown or a driver reports over-temperature or over-current.
+- **ESTOP:** stop joint pulses (short deceleration if moving fast; stop at once if triggered by a hardware button or LIMIT_Z), stop and brake Z, keep drivers enabled, set the ESTOP flag. Drivers are disabled only when the user commands it (DISABLE, which stays allowed during ESTOP so the arm can be moved by hand, and which clears the homed flag) or a driver reports over-temperature or over-current. ENABLE is refused during ESTOP until RESET.
 - **Homing:** Z first (raise slowly until limit #1), then both joints using the AS5600 angle. Every MOVE is rejected with error:4 until homed.
 - **External pull-downs on D34 / D35,** and 5–10 ms debounce in firmware.
 
