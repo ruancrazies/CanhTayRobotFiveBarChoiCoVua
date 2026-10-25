@@ -23,8 +23,10 @@ Host-side checks (no board needed):
 ```
 pio test -e native                    # reference runner for the unit tests (Unity 2.6.1)
 firmware/tools/run_host_tests.sh      # plain g++/clang++: unit tests, main.cpp against an Arduino stub,
-                                      # every header compiled alone, SDK-style include shadowing, strict warnings
-pytest tests/test_firmware_headers.py tests/test_firmware_layout.py
+                                      # every header compiled alone, SDK-style include shadowing, strict warnings,
+                                      # and the wire-compat check below
+python3 firmware/tools/wire_compat/wire_compat.py   # C++ core vs Python ESP32 simulator vs the SPEC 5.1 rules
+pytest tests/test_firmware_headers.py tests/test_firmware_layout.py tests/test_wire_compat.py
 ```
 
 None of these compiles for the ESP32. They imitate what broke the first ESP32 build (libraries in `lib/` do not
@@ -65,17 +67,26 @@ Type each line, press Enter. Replies are exact.
 | `DISABLE` | `ok` | D13 and D26 drop to 0 V; shafts turn freely by hand (SPEC 14 step 4) |
 | `ENABLE` | `ok` | D13 and D26 back to 3.3 V; shafts hold |
 | `ESTOP` | `!alarm:ESTOP` (no `ok`) | D13 and D26 do **not** change: drivers stay enabled |
-| `ENABLE`, `DISABLE`, `MOVE A=1 B=2 F=3` after ESTOP | `error:5` each | |
-| `PING`, `INFO`, `ESTOP` after ESTOP | `ok`, `INFO ...` + `ok`, `!alarm:ESTOP` | still answered in an ESTOP |
-| `RESET` | `ok` | ESTOP cleared; `ENABLE` now answers `ok` again |
+| `ENABLE` and `MOVE A=1 B=2 F=3` while in ESTOP | `error:5` each | D13 and D26 do not change; `ENABLE` is refused until `RESET` |
+| `DISABLE` while in ESTOP | `ok` | D13 and D26 drop to 0 V: `DISABLE` is accepted in an ESTOP (SPEC 5.1); the ESTOP flag stays set |
+| `ENABLE` again while still in ESTOP | `error:5` | D13 and D26 stay at 0 V |
+| `ESTOP` again while in ESTOP | `!alarm:ESTOP` (no `ok`) | accepted and harmless: same reply, nothing else changes |
+| `PING`, `INFO` while in ESTOP | `ok`, `INFO ...` + `ok` | still answered in an ESTOP (so are `POS` and `ZSTOP`, stubs in 4a: see the last table row) |
+| `RESET` | `ok` | ESTOP cleared; the drivers stay as they were (still disabled after the `DISABLE` above) |
+| `ENABLE` after `RESET` | `ok` | D13 and D26 back to 3.3 V |
 | `FOO` | `error:1` | unknown command |
 | `ping` | `error:1` | names are case sensitive |
 | `PING x` | `error:2` | unknown parameter |
 | `GRIP S=181` | `error:2` | parameter out of range |
-| `POS`, `HOME`, `MOVE A=1 B=2 F=3`, `ZUP`, `ZDOWN`, `ZSTOP`, `ACCEL S=1`, `GRIP S=90`, `WAIT` | `error:1` | stubs: parsed, not implemented in 4a |
+| `POS`, `HOME`, `MOVE A=1 B=2 F=3`, `ZUP`, `ZDOWN`, `ZSTOP`, `ACCEL S=1`, `GRIP S=90`, `WAIT` (not in an ESTOP) | `error:1` | stubs: parsed, not implemented in 4a. In an ESTOP only `POS` and `ZSTOP` still answer `error:1`; the other seven answer `error:5` |
 | an empty line | no reply | |
 
 If every row matches, stage 4a is done. If a row does not, paste the lines you typed and the lines you got.
+
+Rules behind the ESTOP rows (SPEC 5.1): while the ESTOP flag is set only `POS`, `INFO`, `PING`, `ZSTOP`,
+`ESTOP`, `RESET` and `DISABLE` are accepted; every other command, `ENABLE` included, answers `error:5`.
+`DISABLE` also clears the homed flag (homing is mandatory afterwards). That flag cannot be set in stage 4a
+(`HOME` is a stub), so it is covered by the unit tests, not by this table.
 
 ## 5. Not in this stage
 

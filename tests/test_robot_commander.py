@@ -284,6 +284,89 @@ def test_homing_is_allowed_on_a_real_port_with_placeholders(tmp_path: Path) -> N
         stack.close()
 
 
+def test_a_bench_disable_makes_homing_mandatory_for_the_commander_too(tmp_path: Path) -> None:
+    """DISABLE clears the firmware's homed flag (SPEC 5.1); the Commander must not go on believing it is homed."""
+    stack = build_stack(tmp_path)
+    try:
+        stack.commander.home()
+        assert stack.commander.homed and stack.sim.homed
+        stack.commander.bench_command(CommandName.DISABLE.value)
+        assert not stack.sim.homed
+        assert not stack.commander.homed and stack.commander.needs_homing
+        _planner, chain = plan_for()
+        before = len(stack.sent_commands())
+        with pytest.raises(NotReadyError, match="homing is required"):
+            stack.commander.execute_chain(chain)
+        assert len(stack.sent_commands()) == before  # refused up front: nothing reached the ESP32
+        stack.commander.bench_command(CommandName.ENABLE.value)
+        assert stack.commander.needs_homing  # ENABLE does not give the homing back
+        stack.commander.home()
+        assert stack.commander.homed and stack.sim.homed
+    finally:
+        stack.close()
+
+
+def test_a_bench_command_is_not_a_reason_to_forget_the_homing_unless_it_is_disable(tmp_path: Path) -> None:
+    stack = build_stack(tmp_path)
+    try:
+        stack.commander.home()
+        for name in (CommandName.ENABLE.value, CommandName.PING.value, CommandName.INFO.value):
+            stack.commander.bench_command(name)
+        assert stack.commander.homed and stack.sim.homed
+    finally:
+        stack.close()
+
+
+def test_in_an_estop_a_bench_disable_is_accepted_and_a_bench_enable_is_refused_until_reset(tmp_path: Path) -> None:
+    stack = build_stack(tmp_path)
+    try:
+        stack.commander.home()
+        stack.sim.inject_estop()
+        assert wait_for(lambda: AlarmCode.ESTOP.value in stack.alarm_requests)
+        stack.commander.bench_command(CommandName.DISABLE.value)  # accepted in an ESTOP
+        assert not stack.sim.drivers_enabled
+        with pytest.raises(CommandFailedError) as raised:
+            stack.commander.bench_command(CommandName.ENABLE.value)
+        assert raised.value.code is ErrorCode.IN_ESTOP
+        assert not stack.sim.drivers_enabled
+        stack.commander.bench_command(CommandName.RESET.value)
+        stack.commander.bench_command(CommandName.ENABLE.value)
+        assert stack.sim.drivers_enabled
+        assert stack.commander.needs_homing
+    finally:
+        stack.close()
+
+
+def test_the_commander_homing_after_an_estop_still_works_with_the_new_estop_rules(tmp_path: Path) -> None:
+    """RESET then HOME is how the Commander recovers; both are accepted (RESET) or only legal after it (HOME)."""
+    stack = build_stack(tmp_path)
+    try:
+        stack.commander.home()
+        stack.sim.inject_estop()
+        assert wait_for(lambda: AlarmCode.ESTOP.value in stack.alarm_requests)
+        assert not stack.commander.homed
+        stack.commander.home()
+        assert stack.commander.homed and stack.sim.homed and not stack.sim.estop
+    finally:
+        stack.close()
+
+
+def test_a_repeated_emergency_stop_is_harmless_for_the_commander(tmp_path: Path) -> None:
+    stack = build_stack(tmp_path)
+    try:
+        stack.commander.home()
+        stack.commander.emergency_stop()
+        assert wait_for(lambda: stack.sim.estop)
+        stack.commander.emergency_stop()  # the firmware accepts it again and repeats the alarm
+        # Wait for the repeated alarm itself: left to arrive during the homing below, it would (rightly) abort it.
+        assert wait_for(lambda: stack.alarm_requests.count(AlarmCode.ESTOP.value) >= 2)
+        assert stack.sim.estop and stack.sim.drivers_enabled
+        stack.commander.home()  # RESET + HOME recovers from it as usual
+        assert stack.commander.homed and not stack.sim.estop
+    finally:
+        stack.close()
+
+
 # --------------------------------------------------------------------------- #
 # Heartbeat
 # --------------------------------------------------------------------------- #

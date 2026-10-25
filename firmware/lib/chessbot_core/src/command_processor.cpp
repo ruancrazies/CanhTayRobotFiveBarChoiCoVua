@@ -32,31 +32,6 @@ void CommandProcessor::send_alarm(AlarmCode code) {
   send_line(format_alarm(line, sizeof(line), code), line);
 }
 
-// Commands that still work in an ESTOP (same set as the PC simulator). Everything else is error:5.
-bool CommandProcessor::allowed_in_estop(Cmd command) {
-  switch (command) {
-    case Cmd::kPING:
-    case Cmd::kPOS:
-    case Cmd::kINFO:
-    case Cmd::kRESET:
-    case Cmd::kESTOP:
-    case Cmd::kZSTOP:
-      return true;
-    case Cmd::kHOME:
-    case Cmd::kMOVE:
-    case Cmd::kZUP:
-    case Cmd::kZDOWN:
-    case Cmd::kACCEL:
-    case Cmd::kGRIP:
-    case Cmd::kENABLE:
-    case Cmd::kDISABLE:
-    case Cmd::kWAIT:
-    case Cmd::kCount:
-      return false;
-  }
-  return false;
-}
-
 void CommandProcessor::handle_bad_frame() { send_error(ErrorCode::kUNRECOGNIZED); }
 
 void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
@@ -74,7 +49,8 @@ void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
       break;
   }
 
-  if (state_.estop() && !allowed_in_estop(command.id)) {
+  // The ESTOP set is declared once, in protocol.h (CB_ESTOP_ACCEPTED, SPEC 5.1): ENABLE is not in it.
+  if (state_.estop() && !protocol::accepted_in_estop(command.id)) {
     send_error(ErrorCode::kIN_ESTOP);
     return;
   }
@@ -134,7 +110,8 @@ void CommandProcessor::do_enable(bool enable) {
 }
 
 // SPEC 10.2: stop the motion outputs, keep the drivers enabled, set the ESTOP flag. Answered by the
-// alarm alone (no ok).
+// alarm alone (no ok). Repeating it while already in ESTOP is accepted and harmless: the same steps run
+// again and the alarm is sent again (SPEC 5.1).
 void CommandProcessor::do_estop() {
   hardware_->halt_motion_outputs();
   queue_.clear();

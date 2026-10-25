@@ -7,8 +7,11 @@
 //
 // Order of checks for a line (same order as the PC simulator, desktop_app/hardware/esp32_simulator.py):
 //   1. blank line: no reply                     2. unknown command: error:1
-//   3. bad parameter: error:2                   4. in ESTOP and not an ESTOP-safe command: error:5
+//   3. bad parameter: error:2                   4. in ESTOP and not accepted there: error:5
 //   5. the command itself (a stub: error:1)
+// While the ESTOP flag is set only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted (SPEC 5.1;
+// declared once as CB_ESTOP_ACCEPTED in protocol.h). ENABLE is refused with error:5 until RESET. DISABLE
+// clears the homed flags, in an ESTOP or not.
 #ifndef CHESSBOT_COMMAND_PROCESSOR_H
 #define CHESSBOT_COMMAND_PROCESSOR_H
 
@@ -39,6 +42,10 @@ class HardwareOps {
   virtual void halt_motion_outputs() = 0;
 };
 
+// Defined by the unit tests only, to preset the device state (stage 4a has no HOME that could set the homed
+// flags). Nothing in the firmware uses it.
+struct CommandProcessorTestPeer;
+
 class CommandProcessor {
  public:
   CommandProcessor(ResponseSink* sink, HardwareOps* hardware);
@@ -62,6 +69,8 @@ class CommandProcessor {
   const CommandQueue& queue() const { return queue_; }
 
  private:
+  friend struct CommandProcessorTestPeer;
+
   void send_ok();
   void send_error(protocol::ErrorCode code);
   void send_alarm(protocol::AlarmCode code);
@@ -72,8 +81,6 @@ class CommandProcessor {
   void do_enable(bool enable);
   void do_estop();
   void do_reset();
-
-  static bool allowed_in_estop(protocol::Cmd command);
 
   ResponseSink* sink_;
   HardwareOps* hardware_;

@@ -56,6 +56,47 @@ void test_estop_does_not_re_enable_drivers_that_the_user_disabled() {
   TEST_ASSERT_TRUE(!state.drivers_enabled());  // only ENABLE / DISABLE change it
 }
 
+void test_disabling_the_drivers_clears_homing_and_enabling_does_not_restore_it() {
+  // Owner decision (SPEC 5.1): DISABLE clears the homed flag; homing is mandatory afterwards.
+  DeviceState state;
+  state.set_homed_z(true);
+  state.set_homed_joints(true);
+  TEST_ASSERT_TRUE(state.homed());
+  state.set_drivers_enabled(false);
+  TEST_ASSERT_TRUE(!state.drivers_enabled());
+  TEST_ASSERT_TRUE(!state.homed_z() && !state.homed_joints());
+  state.set_drivers_enabled(true);
+  TEST_ASSERT_TRUE(state.drivers_enabled());
+  TEST_ASSERT_TRUE(!state.homed_z() && !state.homed_joints());  // ENABLE does not give the homing back
+}
+
+void test_disabling_clears_a_half_homed_state_too() {
+  DeviceState only_z;
+  only_z.set_homed_z(true);
+  only_z.set_drivers_enabled(false);
+  TEST_ASSERT_TRUE(!only_z.homed_z() && !only_z.homed_joints());
+  DeviceState only_joints;
+  only_joints.set_homed_joints(true);
+  only_joints.set_drivers_enabled(false);
+  TEST_ASSERT_TRUE(!only_joints.homed_z() && !only_joints.homed_joints());
+}
+
+void test_enabling_never_changes_the_homed_flags() {
+  DeviceState state;  // power-up: the drivers are already enabled
+  state.set_homed_z(true);
+  state.set_homed_joints(true);
+  state.set_drivers_enabled(true);
+  TEST_ASSERT_TRUE(state.homed());
+}
+
+void test_disabling_leaves_the_estop_flag_and_the_alarms_alone() {
+  DeviceState state;
+  state.enter_estop();
+  state.set_drivers_enabled(false);
+  TEST_ASSERT_TRUE(state.estop());
+  TEST_ASSERT_TRUE(state.alarm_latched(protocol_alarm::kESTOP));
+}
+
 void test_heartbeat_timeout_is_not_an_estop_and_keeps_the_drivers() {
   DeviceState state;
   state.set_homed_z(true);
@@ -161,6 +202,10 @@ int main(int, char**) {
   RUN_TEST(test_estop_sets_the_flag_latches_the_alarm_clears_homing_and_keeps_the_drivers);
   RUN_TEST(test_estop_is_idempotent);
   RUN_TEST(test_estop_does_not_re_enable_drivers_that_the_user_disabled);
+  RUN_TEST(test_disabling_the_drivers_clears_homing_and_enabling_does_not_restore_it);
+  RUN_TEST(test_disabling_clears_a_half_homed_state_too);
+  RUN_TEST(test_enabling_never_changes_the_homed_flags);
+  RUN_TEST(test_disabling_leaves_the_estop_flag_and_the_alarms_alone);
   RUN_TEST(test_heartbeat_timeout_is_not_an_estop_and_keeps_the_drivers);
   RUN_TEST(test_every_alarm_makes_homing_mandatory);
   RUN_TEST(test_alarms_are_independent_bits);

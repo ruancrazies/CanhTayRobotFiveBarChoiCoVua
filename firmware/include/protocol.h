@@ -127,6 +127,18 @@ constexpr CommandSpec kCommands[] = {
 
 constexpr uint8_t kCommandCount = static_cast<uint8_t>(Cmd::kCount);
 
+// ---- Commands accepted while the ESTOP flag is set (SPEC 5.1, 10.2) ---------------------------
+// X(NAME), in the order of the SPEC table. Every command NOT listed here, ENABLE included, is answered
+// error:5 in an ESTOP. config/protocol_commands.py (ACCEPTED_IN_ESTOP) says the same; a test compares them.
+#define CB_ESTOP_ACCEPTED(X) \
+  X(ZSTOP)                   \
+  X(DISABLE)                 \
+  X(POS)                     \
+  X(INFO)                    \
+  X(PING)                    \
+  X(ESTOP)                   \
+  X(RESET)
+
 // ---- Command parameters -----------------------------------------------------------------------
 // X(COMMAND, NAME, kind, required, positive, has_min, min, has_max, max)
 //   kind: FLOAT (KEY=value) | FLAG (bare token). min and max are inclusive and count only when has_min /
@@ -202,6 +214,19 @@ inline const CommandSpec& spec_of(Cmd command) { return kCommands[static_cast<ui
 inline const char* name_of(Cmd command) { return spec_of(command).name; }
 inline const char* name_of(AlarmCode alarm) { return kAlarmNames[static_cast<uint8_t>(alarm)]; }
 inline uint8_t number_of(ErrorCode code) { return static_cast<uint8_t>(code); }
+
+// True when ``command`` is still accepted while the ESTOP flag is set (the CB_ESTOP_ACCEPTED list).
+inline bool accepted_in_estop(Cmd command) {
+  switch (command) {
+#define CB_ESTOP_CASE(name) \
+  case Cmd::k##name:        \
+    return true;
+    CB_ESTOP_ACCEPTED(CB_ESTOP_CASE)
+#undef CB_ESTOP_CASE
+    default:
+      return false;
+  }
+}
 
 }  // namespace protocol
 }  // namespace chessbot

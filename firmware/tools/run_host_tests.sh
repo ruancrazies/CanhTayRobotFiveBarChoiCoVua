@@ -12,7 +12,8 @@
 #  3. every header of include/ and lib/chessbot_core/src compiled ALONE (self-contained) in five include
 #     setups, including ones where an SDK-style decoy config.h / pins.h / protocol.h comes first;
 #  4. src/main.cpp again with the decoys first;
-#  5. the firmware sources (not the tests) under -Wpedantic -Wconversion -Wsign-conversion -Wold-style-cast.
+#  5. the firmware sources (not the tests) under -Wpedantic -Wconversion -Wsign-conversion -Wold-style-cast;
+#  6. wire compatibility of the C++ core with the Python simulator (tools/wire_compat/wire_compat.py).
 # All builds use -Wall -Wextra -Wshadow -Werror. Exit status: 0 when everything passed, 1 otherwise.
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -81,6 +82,18 @@ if ! "$cxx" -std="$std" $warn -fsyntax-only -include "$stub" \
   echo "MAIN.CPP BREAKS WHEN AN SDK-STYLE HEADER COMES FIRST"
   sed 's/^/    /' "$out/main_decoy.log" | head -6
   status=1
+fi
+
+# 6. wire compatibility: the C++ core, the Python ESP32 simulator and an independent model of the SPEC 5.1
+#    rules must answer the same scripts the same way (ESTOP set, ENABLE / DISABLE, repeated ESTOP). Needs python3
+#    and the repository's Python packages; skipped with a notice when python3 is missing.
+echo "== wire compatibility (C++ core vs Python simulator vs model)"
+if command -v python3 > /dev/null 2>&1; then
+  if ! python3 -I "$here/tools/wire_compat/wire_compat.py" --cxx "$cxx"; then
+    status=1
+  fi
+else
+  echo "SKIPPED: python3 not found"
 fi
 
 # 5. the firmware sources (not the tests) under stricter warnings

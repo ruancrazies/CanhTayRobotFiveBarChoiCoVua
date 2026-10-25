@@ -94,6 +94,7 @@ _ZDOWN = CommandName.ZDOWN.value
 _GRIP = CommandName.GRIP.value
 _HOME = CommandName.HOME.value
 _RESET = CommandName.RESET.value
+_DISABLE = CommandName.DISABLE.value
 _ESTOP = CommandName.ESTOP.value
 _ACCEL = CommandName.ACCEL.value
 
@@ -530,7 +531,14 @@ class RobotCommander:
             logger.warning("BENCH MODE command: %s", command.encode())
         with self._op_lock:
             epoch = self._begin(require_homed=False)
-            request = self._finish(self._submit(command), epoch)
+            try:
+                request = self._finish(self._submit(command), epoch)
+            finally:
+                if name == _DISABLE:
+                    # DISABLE clears the firmware's homed flag (SPEC 5.1). Forget it here too, also when the
+                    # outcome is unknown (a timeout): believing in a homing that is gone is the unsafe error.
+                    with self._cond:
+                        self._homed = False
             return request.data
 
     # ------------------------------------------------------------------ #

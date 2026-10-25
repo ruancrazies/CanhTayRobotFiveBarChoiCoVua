@@ -1,10 +1,11 @@
 """The single declaration of the serial protocol (docs/SPEC.md section 5, SPEC rule 6).
 
 Everything the PC side knows about the wire format is declared here and nowhere else: the
-commands and their parameters, the response types, the error codes 1 to 5 and the alarm codes.
-``desktop_app/hardware/protocol.py`` (encoder and parser), the ESP32 simulator and the tests all
-build on this module. ``firmware/include/protocol.h`` (phase 4) must declare the same thing; the
-cross-check test in ``tests/test_protocol_declaration.py`` compares them.
+commands and their parameters, the response types, the error codes 1 to 5, the alarm codes and
+which commands are still accepted while the ESTOP flag is set. ``desktop_app/hardware/protocol.py``
+(encoder and parser), the ESP32 simulator and the tests all build on this module.
+``firmware/include/protocol.h`` (phase 4) must declare the same thing; the cross-check test in
+``tests/test_protocol_declaration.py`` compares them, and compares both with the SPEC text.
 
 Pure data and the standard library only: no Qt, no serial port, no hardware values. Values the SPEC
 marks [TO CONFIRM] (baud rate, speed, acceleration, Z timeout) are NOT here; they are settings of
@@ -137,6 +138,9 @@ class CommandSpec:
     ack: Ack = Ack.OK
     completion: Completion = Completion.NONE
     data_line: Optional[str] = None  # name of the data line sent before ok (POS, INFO)
+    # True when the command is still accepted while the ESTOP flag is set (SPEC 5.1). The default is False
+    # on purpose: a command nobody listed is refused with error:5 in an ESTOP.
+    accepted_in_estop: bool = False
 
 
 @dataclass(frozen=True)
@@ -165,21 +169,47 @@ _COMMAND_LIST: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(CommandName.ZUP.value, (), "Raise Z until limit #1 triggers", completion=Completion.DONE),
     CommandSpec(CommandName.ZDOWN.value, (), "Lower Z until limit #2 triggers", completion=Completion.DONE),
-    CommandSpec(CommandName.ZSTOP.value, (), "Stop and brake Z immediately"),
+    CommandSpec(CommandName.ZSTOP.value, (), "Stop and brake Z immediately", accepted_in_estop=True),
     CommandSpec(CommandName.ACCEL.value, (_float("S", positive=True),), "Acceleration for the following segments"),
     CommandSpec(CommandName.GRIP.value, (_float("S", minimum=0.0, maximum=180.0),), "Gripper servo angle in degrees"),
-    CommandSpec(CommandName.ENABLE.value, (), "Enable both TB6600 drivers"),
-    CommandSpec(CommandName.DISABLE.value, (), "Disable both TB6600 drivers"),
+    CommandSpec(CommandName.ENABLE.value, (), "Enable both TB6600 drivers (error:5 in an ESTOP, until RESET)"),
+    CommandSpec(
+        CommandName.DISABLE.value,
+        (),
+        "Disable both TB6600 drivers and clear the homed flag; accepted in an ESTOP",
+        accepted_in_estop=True,
+    ),
     CommandSpec(CommandName.WAIT.value, (), "Wait for the motion queue to drain", completion=Completion.DONE),
-    CommandSpec(CommandName.POS.value, (), "Commanded angles, AS5600 angles, steps issued, Z state", data_line="POS"),
-    CommandSpec(CommandName.INFO.value, (), "Firmware and protocol version", data_line="INFO"),
-    CommandSpec(CommandName.PING.value, (), "Heartbeat from the PC"),
-    CommandSpec(CommandName.ESTOP.value, (), "Stop the joints and Z, set the ESTOP flag", ack=Ack.ESTOP_ALARM),
-    CommandSpec(CommandName.RESET.value, (), "Clear ESTOP and the alarms; homing is mandatory afterwards"),
+    CommandSpec(
+        CommandName.POS.value,
+        (),
+        "Commanded angles, AS5600 angles, steps issued, Z state",
+        data_line="POS",
+        accepted_in_estop=True,
+    ),
+    CommandSpec(CommandName.INFO.value, (), "Firmware and protocol version", data_line="INFO", accepted_in_estop=True),
+    CommandSpec(CommandName.PING.value, (), "Heartbeat from the PC", accepted_in_estop=True),
+    CommandSpec(
+        CommandName.ESTOP.value,
+        (),
+        "Stop the joints and Z, set the ESTOP flag; a repeated ESTOP in an ESTOP is accepted and harmless",
+        ack=Ack.ESTOP_ALARM,
+        accepted_in_estop=True,
+    ),
+    CommandSpec(
+        CommandName.RESET.value,
+        (),
+        "Clear ESTOP and the alarms; homing is mandatory afterwards",
+        accepted_in_estop=True,
+    ),
 )
 
 COMMANDS: Mapping[str, CommandSpec] = MappingProxyType({spec.name: spec for spec in _COMMAND_LIST})
 COMMAND_ORDER: tuple[str, ...] = tuple(spec.name for spec in _COMMAND_LIST)  # the order of the SPEC 5.1 table
+# The commands accepted while the ESTOP flag is set (SPEC 5.1, 10.2), in the order of the SPEC table. Every
+# other command, ENABLE included, is answered error:5. The ESP32 simulator builds its ESTOP check from this
+# tuple, and firmware/include/protocol.h (CB_ESTOP_ACCEPTED) is compared with it by a test.
+ACCEPTED_IN_ESTOP: tuple[str, ...] = tuple(spec.name for spec in _COMMAND_LIST if spec.accepted_in_estop)
 
 DATA_LINES: Mapping[str, tuple[FieldSpec, ...]] = MappingProxyType(
     {
@@ -208,6 +238,7 @@ def declaration_as_dict() -> dict[str, Any]:
         "error_codes": {code.name: int(code) for code in ErrorCode},
         "alarm_codes": [code.value for code in AlarmCode],
         "z_states": [state.value for state in ZState],
+        "accepted_in_estop": list(ACCEPTED_IN_ESTOP),
         "commands": {
             spec.name: {
                 "params": [

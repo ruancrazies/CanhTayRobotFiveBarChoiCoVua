@@ -27,7 +27,10 @@ Interpretations the SPEC does not spell out (reported in the phase 3 summary):
 * ``F`` is in degrees per second (``ACCEL`` is in deg/s^2). The queue length counts the MOVE being
   executed. A MOVE is checked in this order: ESTOP (5), parameters and joint limits (2), homed and
   Z at TOP (4), queue room (3).
-* In ESTOP only PING, POS, INFO, RESET, ESTOP and ZSTOP are accepted; everything else is ``error:5``.
+* In ESTOP only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted; everything else, ENABLE
+  included, is ``error:5`` until RESET. A repeated ESTOP is answered ``!alarm:ESTOP`` again. DISABLE clears
+  both homed flags (homing is mandatory afterwards) and aborts a HOME that still has the joints to do, as
+  ZSTOP aborts a homing: no ``done``. A Z-only HOME needs no driver and carries on.
   LIMIT_Z is an emergency stop too (SPEC 10.2: "stop at once if triggered by ... LIMIT_Z"), and
   answers with ``!alarm:LIMIT_Z`` only.
 * A Z command while Z is moving replaces the running one (its ``done`` is never sent).
@@ -44,7 +47,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Optional
 
-from config.protocol_commands import PROTOCOL_VERSION, AlarmCode, CommandName, ErrorCode, ZState
+from config.protocol_commands import ACCEPTED_IN_ESTOP, PROTOCOL_VERSION, AlarmCode, CommandName, ErrorCode, ZState
 from desktop_app.hardware.protocol import (
     Command,
     CommandError,
@@ -179,10 +182,10 @@ _TIME_SLACK_S = 1e-9
 def _reached(now: float, moment: float) -> bool:
     """True when ``now`` is at or after ``moment``."""
     return now + _TIME_SLACK_S >= moment
-_ALWAYS_ALLOWED_IN_ESTOP = frozenset(
-    name.value
-    for name in (CommandName.PING, CommandName.POS, CommandName.INFO, CommandName.RESET, CommandName.ESTOP, CommandName.ZSTOP)
-)
+
+# The commands accepted while the ESTOP flag is set (SPEC 5.1). Taken from the declaration, so the simulator
+# and the firmware (CB_ESTOP_ACCEPTED in protocol.h, cross-checked by the tests) cannot drift apart.
+_ALWAYS_ALLOWED_IN_ESTOP = frozenset(ACCEPTED_IN_ESTOP)
 _HOME, _ZUP, _ZDOWN = CommandName.HOME.value, CommandName.ZUP.value, CommandName.ZDOWN.value
 
 
@@ -485,8 +488,11 @@ class Esp32Simulator:
         self._drivers_enabled = True
         self._ok()
 
-    def _cmd_disable(self, _command: Command, _now: float) -> None:
+    def _cmd_disable(self, _command: Command, now: float) -> None:
         self._drivers_enabled = False
+        self._homed_z = self._homed_joints = False  # homing is mandatory afterwards (SPEC 5.1)
+        if self._home_job is not None and self._home_job.joints:
+            self._freeze_z(now)  # a homing that still needs the joints cannot complete without the drivers
         self._ok()
 
     def _cmd_move(self, command: Command, now: float) -> None:

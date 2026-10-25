@@ -53,7 +53,14 @@ class DeviceState {
 
   bool estop() const { return estop_; }
   bool drivers_enabled() const { return drivers_enabled_; }
-  void set_drivers_enabled(bool value) { drivers_enabled_ = value; }
+  // ENABLE and DISABLE (SPEC 5.1). ENABLE never changes the homed flags. DISABLE clears them: with the
+  // drivers off the motors can be moved by hand or lose position, so homing is mandatory afterwards.
+  void set_drivers_enabled(bool value) {
+    drivers_enabled_ = value;
+    if (!value) {
+      clear_homed();
+    }
+  }
 
   bool alarm_latched(protocol::AlarmCode alarm) const { return (alarms_ & alarm_bit(alarm)) != 0; }
   bool any_alarm() const { return alarms_ != 0; }
