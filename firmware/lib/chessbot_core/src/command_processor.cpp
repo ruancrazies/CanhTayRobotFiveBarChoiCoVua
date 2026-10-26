@@ -54,6 +54,9 @@ void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
     send_error(ErrorCode::kIN_ESTOP);
     return;
   }
+  if (!passes_gates(command)) {
+    return;
+  }
 
   switch (command.id) {
     case Cmd::kINFO:
@@ -90,6 +93,33 @@ void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
   }
 }
 
+void CommandProcessor::clear_motion_queue() {
+  // Stage 4b: a WAIT that is pending is cancelled here, with no done (SPEC 5.1, "Cancelled done"). There is no
+  // WAIT in 4a, so the queue is all there is to clear.
+  queue_.clear();
+}
+
+// Checks 4 to 6 of the order in command_processor.h, in that order. Only MOVE and HOME have gates; every other
+// command passes. HOME that moves only Z (HOME Z, without AB) needs no joint driver and is not gated.
+bool CommandProcessor::passes_gates(const Command& command) {
+  const bool moves_joints = command.id == Cmd::kMOVE || (command.id == Cmd::kHOME && (command.has("AB") || !command.has("Z")));
+  if (moves_joints && !state_.drivers_enabled()) {
+    send_error(ErrorCode::kDRIVERS_DISABLED);
+    return false;
+  }
+  if (command.id == Cmd::kMOVE) {
+    if (!state_.homed()) {
+      send_error(ErrorCode::kNOT_HOMED);
+      return false;
+    }
+    if (queue_.full()) {
+      send_error(ErrorCode::kQUEUE_FULL);
+      return false;
+    }
+  }
+  return true;
+}
+
 void CommandProcessor::do_info() {
   char line[config::kMaxResponseBytes + 1];
   if (format_info(line, sizeof(line), config::kFirmwareVersion)) {
@@ -103,7 +133,14 @@ void CommandProcessor::do_ping(uint32_t now_ms) {
   send_ok();
 }
 
+// ENABLE only sets the pins and the flag. DISABLE (SPEC 5.1, "DISABLE rules"), in this order: stop the joint pulses,
+// clear the whole queue, drive the ENA pins to the disabled level, clear the homed flags (set_drivers_enabled).
+// Z is not touched, so a Z-only HOME and a running ZUP / ZDOWN carry on (stage 4b).
 void CommandProcessor::do_enable(bool enable) {
+  if (!enable) {
+    hardware_->stop_joint_pulses();
+    clear_motion_queue();
+  }
   hardware_->set_drivers_enabled(enable);
   state_.set_drivers_enabled(enable);
   send_ok();
@@ -114,13 +151,13 @@ void CommandProcessor::do_enable(bool enable) {
 // again and the alarm is sent again (SPEC 5.1).
 void CommandProcessor::do_estop() {
   hardware_->halt_motion_outputs();
-  queue_.clear();
+  clear_motion_queue();
   state_.enter_estop();
   send_alarm(AlarmCode::kESTOP);
 }
 
 void CommandProcessor::do_reset() {
-  queue_.clear();
+  clear_motion_queue();
   state_.reset();
   send_ok();
 }
@@ -130,7 +167,7 @@ void CommandProcessor::tick(uint32_t now_ms) {
     return;
   }
   hardware_->halt_motion_outputs();  // the drivers stay enabled
-  queue_.clear();
+  clear_motion_queue();
   state_.enter_heartbeat_timeout();
   send_alarm(AlarmCode::kHB_TIMEOUT);
 }

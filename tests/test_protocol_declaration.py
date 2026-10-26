@@ -20,6 +20,7 @@ import yaml
 from config import protocol_commands as declaration
 from config.protocol_commands import (
     ACCEPTED_IN_ESTOP,
+    CHECK_ORDER,
     COMMAND_ORDER,
     COMMANDS,
     AlarmCode,
@@ -31,6 +32,9 @@ from config.protocol_commands import (
 # The owner's decision (SPEC 5.1 and 10.2), typed out here on purpose so that it is not derived from the very
 # declaration it is checked against. In the order of the SPEC 5.1 table.
 OWNER_ESTOP_SET = ("ZSTOP", "DISABLE", "POS", "INFO", "PING", "ESTOP", "RESET")
+# The order of checks (SPEC 5.2) as error numbers, typed out for the same reason: parse (1, 2), ESTOP (5), drivers
+# disabled (6), not homed (4), queue full (3).
+OWNER_CHECK_ORDER = (1, 2, 5, 6, 4, 3)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEC = REPO_ROOT / "docs" / "SPEC.md"
@@ -70,7 +74,7 @@ def test_commands_match_the_spec_table_in_order() -> None:
 def test_error_codes_match_the_spec_text() -> None:
     line = next(l for l in spec_section("5.2").splitlines() if l.startswith("- `error:<code>`"))
     codes = {int(n) for n in re.findall(r"(\d)\s+[a-z]", line.split(":", 2)[2])}
-    assert codes == {int(code) for code in ErrorCode} == {1, 2, 3, 4, 5}
+    assert codes == {int(code) for code in ErrorCode} == {1, 2, 3, 4, 5, 6}
 
 
 def test_alarm_codes_match_the_spec_text() -> None:
@@ -167,7 +171,10 @@ def test_declaration_is_plain_serialisable_data() -> None:
     data = declaration_as_dict()
     assert json.loads(json.dumps(data)) == data
     assert list(data["commands"]) == list(COMMAND_ORDER)
-    assert data["error_codes"] == {"UNRECOGNIZED": 1, "BAD_PARAMETER": 2, "QUEUE_FULL": 3, "NOT_HOMED": 4, "IN_ESTOP": 5}
+    assert data["error_codes"] == {
+        "UNRECOGNIZED": 1, "BAD_PARAMETER": 2, "QUEUE_FULL": 3, "NOT_HOMED": 4, "IN_ESTOP": 5, "DRIVERS_DISABLED": 6,
+    }
+    assert data["check_order"] == ["UNRECOGNIZED", "BAD_PARAMETER", "IN_ESTOP", "DRIVERS_DISABLED", "NOT_HOMED", "QUEUE_FULL"]
     assert data["alarm_codes"] == ["ESTOP", "LIMIT_Z", "Z_TIMEOUT", "SENSOR_FAULT", "STEP_LOSS", "HB_TIMEOUT"]
     assert data["accepted_in_estop"] == list(OWNER_ESTOP_SET)
 
@@ -204,7 +211,7 @@ def test_the_declaration_adds_no_hardware_value() -> None:
         for n in ast.walk(tree)
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool)
     }
-    assert numbers <= {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 180.0}, numbers
+    assert numbers <= {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 180.0}, numbers
     hardware = yaml.safe_load((REPO_ROOT / "config" / "hardware.yaml").read_text(encoding="utf-8"))
     assert "protocol" not in hardware and "baud" not in str(hardware).lower()  # baud is [TO CONFIRM]: not invented here
 
@@ -294,6 +301,7 @@ def header_declaration(text: str) -> dict[str, object]:
             "alarm_prefix": _constant(text, "kAlarmPrefix").strip('"'),
         },
         "error_codes": {name: int(number) for name, number in _macro_rows(text, "CB_ERROR_CODES")},
+        "check_order": [row[0] for row in _macro_rows(text, "CB_CHECK_ORDER")],
         "alarm_codes": [row[0] for row in _macro_rows(text, "CB_ALARM_CODES")],
         "z_states": [row[0] for row in _macro_rows(text, "CB_Z_STATES")],
         "accepted_in_estop": [row[0] for row in _macro_rows(text, "CB_ESTOP_ACCEPTED")],
@@ -332,6 +340,7 @@ def comparable_declaration() -> dict[str, object]:
         "line_terminator": "'\\n'",
         "responses": data["responses"],
         "error_codes": data["error_codes"],
+        "check_order": data["check_order"],
         "alarm_codes": data["alarm_codes"],
         "z_states": data["z_states"],
         "accepted_in_estop": data["accepted_in_estop"],
@@ -354,10 +363,18 @@ def test_protocol_h_command_names_and_order_match(header_text: str) -> None:
     assert list(header["commands"]) == list(COMMAND_ORDER)  # type: ignore[arg-type]
 
 
-def test_protocol_h_error_codes_match_and_are_1_to_5(header_text: str) -> None:
+def test_protocol_h_error_codes_match_and_are_1_to_6(header_text: str) -> None:
     header = header_declaration(header_text)
     assert header["error_codes"] == {code.name: int(code) for code in ErrorCode}
-    assert sorted(header["error_codes"].values()) == [1, 2, 3, 4, 5]  # type: ignore[union-attr]
+    assert sorted(header["error_codes"].values()) == [1, 2, 3, 4, 5, 6]  # type: ignore[union-attr]
+    assert header["error_codes"]["DRIVERS_DISABLED"] == 6  # type: ignore[index]
+
+
+def test_protocol_h_check_order_matches_the_declaration_and_the_owner_decision(header_text: str) -> None:
+    header = header_declaration(header_text)
+    numbers = header["error_codes"]
+    assert header["check_order"] == [code.name for code in CHECK_ORDER]
+    assert [numbers[name] for name in header["check_order"]] == list(OWNER_CHECK_ORDER)  # type: ignore[index]
 
 
 def test_protocol_h_alarm_codes_match_in_order(header_text: str) -> None:
@@ -408,7 +425,10 @@ def test_protocol_h_matches_the_declaration_as_a_whole(header_text: str) -> None
 @pytest.mark.parametrize(
     "old, new",
     [
-        ("X(UNRECOGNIZED, 1)", "X(UNRECOGNIZED, 6)"),  # an error code number
+        ("X(UNRECOGNIZED, 1)", "X(UNRECOGNIZED, 7)"),  # an error code number
+        ("X(DRIVERS_DISABLED, 6)", "X(DRIVERS_DISABLED, 7)"),  # the new error code number
+        ("X(IN_ESTOP)             \\\n  X(DRIVERS_DISABLED)", "X(DRIVERS_DISABLED)     \\\n  X(IN_ESTOP)"),  # two checks swapped
+        ("  X(NOT_HOMED)            \\\n  X(QUEUE_FULL)\n", "  X(NOT_HOMED)\n"),  # a check dropped from the order
         ("X(LIMIT_Z)", "X(LIMIT_ZZ)"),  # an alarm name
         ("X(HB_TIMEOUT)", "X(HB_TIMEOUTS)"),  # the last alarm name
         ("X(ZUP, DONE, OK, NONE)", "X(ZUP, NONE, OK, NONE)"),  # a completion kind
@@ -439,3 +459,68 @@ def test_the_cross_check_detects_a_missing_command_and_a_swapped_order(header_te
                                   "  X(MOVE, NONE, OK, NONE)          \\\n  X(HOME, DONE, OK, NONE)          \\\n", 1)
     assert swapped != header_text
     assert list(header_declaration(swapped)["commands"]) != list(COMMAND_ORDER)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# error:6, the order of checks and the DISABLE rules in the SPEC text (owner decisions 1 to 3)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_declared_check_order_is_the_owner_decision() -> None:
+    assert [int(code) for code in CHECK_ORDER] == list(OWNER_CHECK_ORDER)
+    assert sorted(int(code) for code in CHECK_ORDER) == sorted(int(code) for code in ErrorCode)  # each code once
+
+
+def test_the_spec_5_2_lists_the_order_of_checks_as_declared() -> None:
+    section = spec_section("5.2")
+    start = section.index("**Order of checks.**")
+    items = re.findall(r"^\s+\d+\.\s.*$", section[start:], re.M)
+    assert len(items) == len(CHECK_ORDER)
+    numbers = [int(re.search(r"`error:(\d)`", item).group(1)) for item in items]  # type: ignore[union-attr]
+    assert numbers == list(OWNER_CHECK_ORDER)
+    assert "CHECK_ORDER" in section and "CB_CHECK_ORDER" in section  # says where it is declared
+
+
+def test_the_spec_says_what_error_6_means_and_which_commands_it_covers() -> None:
+    line = next(l for l in spec_section("5.2").splitlines() if l.startswith("- `error:<code>`"))
+    assert "6 drivers disabled" in line and "HOME" in line.split("6 drivers disabled", 1)[1]
+    rows = {
+        row.split("|")[1].split()[0]: row
+        for row in spec_section("5.1").splitlines()
+        if row.startswith("| ") and not row.startswith("| Command") and not row.startswith("| ---")
+    }
+    assert "error:6" in rows["HOME"] and "HOME Z" in rows["HOME"] and "never enables the drivers" in rows["HOME"]
+    assert "error:6" in rows["MOVE"]
+    assert "error:6" not in rows["ZUP"] and "error:6" not in rows["ENABLE"]  # only MOVE and a joint HOME need the drivers
+
+
+def test_the_spec_5_1_states_the_disable_rules() -> None:
+    table = spec_section("5.1")
+    disable = table[table.index("**DISABLE rules.**"):table.index("**Cancelled done.**")]
+    for phrase in (
+        "clears the whole motion queue",
+        "discarded, not drained",
+        "**no done is sent**",
+        "`HOME Z` carries on",
+        "ZUP or ZDOWN also carries on",
+        "always answers `ok`",
+    ):
+        assert phrase in disable, phrase
+    assert "clear the homed flag" in table.split("| ENABLE / DISABLE |", 1)[1].split("\n", 1)[0] or "clears the homed flag" in table
+
+
+def test_the_spec_5_1_states_what_a_pending_wait_does_when_the_queue_is_cleared() -> None:
+    table = spec_section("5.1")
+    rule = table[table.index("**Cancelled done.**"):]
+    assert "its done is never sent" in rule
+    for event in ("DISABLE", "ESTOP", "RESET", "heartbeat timeout", "new HOME"):
+        assert event in rule, event
+    assert "the rule is the same for all five" in rule
+    assert "finds an empty queue and gets its done at once" in rule
+
+
+def test_the_spec_5_3_and_10_2_carry_the_pc_rules_and_the_homing_rule() -> None:
+    rules = spec_section("5.3")
+    assert "HOME never enables the drivers" in rules and "ENABLE" in rules
+    assert "treats its own DISABLE as the end of every pending wait" in rules
+    assert "error:6" in spec_section("10.2") and "never enables them itself" in spec_section("10.2")

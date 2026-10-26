@@ -120,15 +120,15 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 
 | Command | Function | Response |
 | --- | --- | --- |
-| HOME [Z] [AB] | Homing. No argument: Z first (raise until limit #1), then the two joints using AS5600 | ok, then done |
-| MOVE A=<α> B=<β> F=<speed> | Move both joints to target angles. No Z parameter | ok when queued; error:4 if not homed or Z not at TOP; error:2 if out of limits |
+| HOME [Z] [AB] | Homing. No argument: Z first (raise until limit #1), then the two joints using AS5600. When it moves the joints (no argument, or `AB`) it needs the drivers enabled; `HOME Z` does not. HOME never enables the drivers: the PC sends ENABLE first | ok, then done; error:6 if it moves the joints while the drivers are disabled |
+| MOVE A=<α> B=<β> F=<speed> | Move both joints to target angles. No Z parameter | ok when queued; error:2 if out of limits; error:6 if the drivers are disabled; error:4 if not homed or Z not at TOP; error:3 if the queue is full |
 | ZUP | Raise Z until limit #1 triggers | ok, then done |
 | ZDOWN | Lower Z until limit #2 triggers | ok, then done |
 | ZSTOP | Stop and brake Z immediately | ok |
 | ACCEL S=<deg/s²> | Acceleration for following segments | ok |
 | GRIP S=<0–180> | Gripper servo angle | ok |
-| ENABLE / DISABLE | Enable / disable both TB6600 drivers. DISABLE also clears the homed flag: homing is mandatory afterwards, and ENABLE does not restore it | ok |
-| WAIT | Wait for the motion queue to drain | ok, then done |
+| ENABLE / DISABLE | Enable / disable both TB6600 drivers. DISABLE also clears the homed flag: homing is mandatory afterwards, and ENABLE does not restore it. DISABLE also stops the joint pulses and clears the whole motion queue (see "DISABLE rules" below) | ok |
+| WAIT | Wait for the motion queue to drain | ok, then done; the done is cancelled if the queue is cleared first (see "Cancelled done" below) |
 | POS | Commanded angles, AS5600 angles, steps issued, Z state (TOP / BOTTOM / MID) | one line, then ok |
 | INFO | Firmware and protocol version | one line, then ok |
 | PING | Heartbeat from the PC | ok |
@@ -137,13 +137,24 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 
 **While the ESTOP flag is set** only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted. Every other command, including ENABLE, is answered `error:5`; ENABLE works again after RESET. The ESTOP check comes after parsing, so an unknown command is still `error:1` and a bad parameter still `error:2`. A repeated ESTOP while already in ESTOP is accepted and harmless: the answer is `!alarm:ESTOP` again and nothing else changes. DISABLE is accepted in ESTOP and clears the homed flag there too. RESET clears ESTOP but leaves the drivers as ENABLE or DISABLE last set them.
 
+**DISABLE rules.** DISABLE is accepted at any time (also in an ESTOP) and always answers `ok`. In this order it: stops the joint pulses, clears the whole motion queue (MOVEs that are queued or running are discarded, not drained, and the joints stay where they stopped), drives both ENA pins to the disabled level, and clears the homed flag. A HOME that still has the joints to do (no argument, or `AB`) is aborted as a ZSTOP aborts a homing: the joint part never runs, the homed flag is not set and **no done is sent**. A `HOME Z` carries on, because Z needs no joint driver, and sends its done; a running ZUP or ZDOWN also carries on and sends its done. DISABLE never moves Z by itself.
+
+**Cancelled done.** A `done` is sent only when the motion it waits for really finished. When the motion queue is cleared without finishing, every WAIT that is pending is cancelled: its `ok` was already sent and **its done is never sent**. The queue is cleared by DISABLE, ESTOP, RESET, a heartbeat timeout (HB_TIMEOUT) and the start of a new HOME, and the rule is the same for all five. A WAIT sent after the clear finds an empty queue and gets its done at once. Consequence for the PC: after it sends DISABLE it must stop waiting for the done of any WAIT or joint HOME it had pending (section 5.3); a DISABLE sent by another client leaves such a wait to hit its own timeout.
+
 ### 5.2 Responses
 
 - `ok`: valid command accepted and queued.
 - `done`: motion queue finished (after HOME or WAIT).
-- `error:<code>`: 1 unrecognized; 2 missing or out-of-range parameter; 3 queue full; 4 not homed; 5 in ESTOP (the command is not one of those accepted in ESTOP, section 5.1).
+- `error:<code>`: 1 unrecognized; 2 missing or out-of-range parameter; 3 queue full; 4 not homed; 5 in ESTOP (the command is not one of those accepted in ESTOP, section 5.1); 6 drivers disabled (MOVE, or HOME when it moves the joints, while the drivers are disabled).
 - `!alarm:<code>` sent asynchronously: `ESTOP`, `LIMIT_Z` (both Z switches active, or Z at TOP with the top switch released without a command), `Z_TIMEOUT`, `SENSOR_FAULT`; plus `STEP_LOSS` and `HB_TIMEOUT` (proposed).
 - `!alarm:ESTOP` is also the answer to an ESTOP command received while already in ESTOP.
+- **Order of checks.** One fixed order for every received line; the first check that fails decides the reply and nothing after it runs. The firmware core, the PC simulator and the wire-compat model all follow it (declared as `CHECK_ORDER` in `config/protocol_commands.py` and `CB_CHECK_ORDER` in `firmware/include/protocol.h`):
+  1. unrecognized command name: `error:1`;
+  2. missing, malformed or out-of-range parameter (including joint limits where they are known): `error:2`;
+  3. the ESTOP flag is set and the command is not accepted in an ESTOP: `error:5`;
+  4. the command needs the joint drivers and they are disabled: `error:6`. This applies to MOVE and to HOME with no argument or with `AB`; `HOME Z` and every other command skip this check;
+  5. the command needs a homed arm: `error:4`. This applies to MOVE (not homed, or Z not at TOP); HOME `AB` without Z at TOP is also `error:4`;
+  6. the motion queue has no room: `error:3` (MOVE only; the command is not queued).
 
 ### 5.3 Rules for the PC side
 
@@ -151,6 +162,8 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 - Send PING periodically. If the ESP32 misses heartbeats beyond the threshold it stops safely (section 10).
 - After any alarm (ESTOP, LIMIT_Z, Z_TIMEOUT, SENSOR_FAULT, STEP_LOSS, HB_TIMEOUT), homing is mandatory.
 - After DISABLE, homing is mandatory too, because DISABLE clears the homed flag in the firmware (section 5.1).
+- HOME never enables the drivers. Before a HOME that moves the joints the PC sends ENABLE (after RESET when an alarm is latched); without it HOME is `error:6`.
+- The PC treats its own DISABLE as the end of every pending wait for a done (WAIT, HOME, and the wait of a ZUP or ZDOWN that was running): the operation that was waiting stops with a defined error, never hangs, and the PC starts no new operation until Z has finished the move that DISABLE did not cancel (section 5.1, "DISABLE rules").
 
 ## 6. Kinematics and trajectory
 
@@ -326,7 +339,7 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 - **Z axis:** ZUP runs until limit #1 triggers; ZDOWN runs until limit #2 triggers. A limit switch stops the motor inside the interrupt (PWM = 0, brake). Moderate PWM, ramped up, eased near the end of travel. On timeout stop and send `!alarm:Z_TIMEOUT`. `LIMIT_Z` when both switches are active, or when Z is at TOP and the top switch releases without a command.
 - **Heartbeat:** if PING is missing beyond the threshold, decelerate both joints in a controlled way, stop and brake Z, **keep drivers enabled** (releasing the motors can collapse the arm and drop Z), wait for the PC to reconnect and re-home.
 - **ESTOP:** stop joint pulses (short deceleration if moving fast; stop at once if triggered by a hardware button or LIMIT_Z), stop and brake Z, keep drivers enabled, set the ESTOP flag. DISABLE only when the user commands a shutdown or a driver reports over-temperature or over-current. While the flag is set only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted; every other command, including ENABLE, is `error:5`, and ENABLE works again after RESET. A repeated ESTOP while already in ESTOP is accepted and harmless.
-- **Homing:** Z first (raise slowly until limit #1), then both joints using the AS5600 angle. Every MOVE is rejected with error:4 until homed. DISABLE clears the homed flag, so homing is mandatory after it as well.
+- **Homing:** Z first (raise slowly until limit #1), then both joints using the AS5600 angle. Every MOVE is rejected with error:4 until homed (after the error:6 check of section 5.2). HOME needs the drivers enabled when it moves the joints and never enables them itself. DISABLE clears the homed flag, so homing is mandatory after it as well; during a running HOME it aborts the joint part without a done, and it clears the whole motion queue (sections 5.1 and 5.2).
 - **External pull-downs on D34 / D35,** and 5–10 ms debounce in firmware.
 
 ## 11. Desktop GUI (PySide6) and Vietnamese UI strings

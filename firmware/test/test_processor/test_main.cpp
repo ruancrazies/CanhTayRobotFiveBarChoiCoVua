@@ -1,5 +1,6 @@
 // CommandProcessor with a fake sink and fake hardware: every reply of stage 4a, SPEC 10.2 boot / ESTOP
-// behaviour, the stubbed commands, the heartbeat step and the queue-full error.
+// behaviour, the stubbed commands, the heartbeat step, the queue-full error, and the driver rules of the phase 4a
+// follow-up (error:6, the order of checks of SPEC 5.2, what DISABLE does to the queue).
 #include <string>
 #include <unity.h>
 #include <vector>
@@ -31,9 +32,21 @@ struct FakeSink : chessbot::ResponseSink {
 
 struct FakeHardware : chessbot::HardwareOps {
   std::vector<bool> driver_calls;  // every set_drivers_enabled(...) argument, in order
+  std::vector<std::string> events;  // every hardware call, in order: "pulses", "halt", "drivers=0", "drivers=1"
   int halts = 0;
-  void set_drivers_enabled(bool enabled) override { driver_calls.push_back(enabled); }
-  void halt_motion_outputs() override { ++halts; }
+  int joint_stops = 0;
+  void set_drivers_enabled(bool enabled) override {
+    driver_calls.push_back(enabled);
+    events.push_back(enabled ? "drivers=1" : "drivers=0");
+  }
+  void halt_motion_outputs() override {
+    ++halts;
+    events.push_back("halt");
+  }
+  void stop_joint_pulses() override {
+    ++joint_stops;
+    events.push_back("pulses");
+  }
 };
 
 struct Bench {
@@ -401,7 +414,8 @@ void test_a_bad_frame_is_error_1() {
 
 void test_every_not_yet_implemented_command_parses_and_answers_error_1() {
   Bench bench;
-  const char* stubs[] = {"HOME", "HOME Z", "HOME AB", "MOVE A=1 B=2 F=3", "ZUP", "ZDOWN", "ZSTOP", "ACCEL S=1", "GRIP S=90", "WAIT", "POS"};
+  // MOVE is not in this list: it goes through the gates first (error:4 here, see the driver-rule tests below).
+  const char* stubs[] = {"HOME", "HOME Z", "HOME AB", "ZUP", "ZDOWN", "ZSTOP", "ACCEL S=1", "GRIP S=90", "WAIT", "POS"};
   for (const char* line : stubs) {
     expect(bench.send(line), {"error:1"}, line);
   }
@@ -415,7 +429,9 @@ void test_every_not_yet_implemented_command_parses_and_answers_error_1() {
 
 void test_the_stubs_are_exactly_the_commands_that_are_not_stage_4a() {
   // Guards the report: a command that is neither stage 4a nor answered error:1 would be a surprise.
-  const char* implemented[] = {"INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET"};
+  // MOVE is "implemented" for this test: with the drivers enabled and the arm not homed the gates answer error:4,
+  // never the error:1 of a stub. It is queued only from stage 4b.
+  const char* implemented[] = {"INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "MOVE"};
   Bench bench;
   for (uint8_t c = 0; c < protocol::kCommandCount; ++c) {
     const std::string name = protocol::kCommands[c].name;
@@ -437,6 +453,222 @@ void test_the_stubs_are_exactly_the_commands_that_are_not_stage_4a() {
     }
     bench.send("RESET");  // leave ESTOP, if this line caused one
   }
+}
+
+
+// ---- driver rules: error:6, the order of checks, DISABLE and the queue (SPEC 5.1, 5.2) -----------------------
+// Everything below is typed out here and NOT taken from protocol.h or from the code under test.
+
+namespace {
+
+chessbot::DeviceState& peer_state(Bench& bench) { return chessbot::CommandProcessorTestPeer::state(bench.processor); }
+
+void fill_the_queue(Bench& bench) {
+  chessbot::Command move(protocol::Cmd::kMOVE);
+  for (int i = 0; i < chessbot::config::kQueueDepth; ++i) {
+    TEST_ASSERT_TRUE(bench.processor.try_enqueue(move));
+  }
+}
+
+}  // namespace
+
+void test_move_with_the_drivers_disabled_is_error_6_and_not_queued() {
+  Bench bench;
+  bench.send("DISABLE");
+  expect(bench.send("MOVE A=1 B=2 F=3"), {"error:6"}, "MOVE after DISABLE");
+  TEST_ASSERT_TRUE(bench.processor.queue().empty());
+}
+
+void test_move_with_the_drivers_enabled_and_not_homed_is_error_4() {
+  Bench bench;
+  expect(bench.send("MOVE A=1 B=2 F=3"), {"error:4"}, "MOVE not homed");
+}
+
+void test_move_on_a_homed_arm_with_room_passes_the_gates_and_is_the_stub() {
+  Bench bench;
+  peer_state(bench).set_homed_z(true);
+  peer_state(bench).set_homed_joints(true);
+  expect(bench.send("MOVE A=1 B=2 F=3"), {"error:1"}, "MOVE homed, room");  // queued from stage 4b on
+  TEST_ASSERT_TRUE(bench.processor.queue().empty());
+}
+
+void test_move_with_a_full_queue_is_error_3_and_not_queued() {
+  Bench bench;
+  peer_state(bench).set_homed_z(true);
+  peer_state(bench).set_homed_joints(true);
+  fill_the_queue(bench);
+  bench.sink.lines.clear();
+  expect(bench.send("MOVE A=1 B=2 F=3"), {"error:3"}, "MOVE full queue");
+  TEST_ASSERT_EQUAL_INT(chessbot::config::kQueueDepth, bench.processor.queue().size());
+}
+
+void test_a_home_that_moves_the_joints_is_error_6_while_the_drivers_are_disabled() {
+  const char* lines[] = {"HOME", "HOME AB", "HOME Z AB", "HOME AB Z"};
+  for (const char* line : lines) {
+    Bench bench;
+    bench.send("DISABLE");
+    expect(bench.send(line), {"error:6"}, line);
+  }
+}
+
+void test_home_z_is_not_gated_by_the_drivers_and_never_enables_them() {
+  Bench bench;
+  bench.send("DISABLE");
+  expect(bench.send("HOME Z"), {"error:1"}, "HOME Z with the drivers disabled");  // the stub: it got past the gates
+  TEST_ASSERT_TRUE(!bench.processor.state().drivers_enabled());
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.driver_calls.size());  // only the DISABLE touched the pins
+}
+
+void test_home_never_enables_the_drivers_even_when_it_is_refused() {
+  Bench bench;
+  bench.send("DISABLE");
+  bench.send("HOME");
+  bench.send("HOME AB");
+  TEST_ASSERT_TRUE(!bench.processor.state().drivers_enabled());
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.driver_calls.size());
+}
+
+void test_the_order_of_checks_error_1_2_then_5_then_6_then_4_then_3() {
+  // 1 and 2 beat the ESTOP check and the drivers check
+  {
+    Bench bench;
+    bench.send("DISABLE");
+    bench.send("ESTOP");
+    expect(bench.send("FOO"), {"error:1"}, "unknown in ESTOP with the drivers disabled");
+    expect(bench.send("MOVE A=1"), {"error:2"}, "bad parameter in ESTOP with the drivers disabled");
+    expect(bench.send("HOME x"), {"error:2"}, "bad HOME parameter");
+    expect(bench.send("MOVE A=1 B=2 F=3"), {"error:5"}, "5 beats 6 (MOVE)");
+    expect(bench.send("HOME"), {"error:5"}, "5 beats 6 (HOME)");
+  }
+  // 2 beats 6
+  {
+    Bench bench;
+    bench.send("DISABLE");
+    expect(bench.send("MOVE A=1 B=2"), {"error:2"}, "bad parameter with the drivers disabled");
+  }
+  // 6 beats 4: disabled and not homed
+  {
+    Bench bench;
+    bench.send("DISABLE");
+    expect(bench.send("MOVE A=1 B=2 F=3"), {"error:6"}, "6 beats 4");
+  }
+  // 6 beats 4 and 3 even in the state a bug could leave behind: disabled, homed, queue full
+  {
+    Bench bench;
+    fill_the_queue(bench);
+    peer_state(bench).set_drivers_enabled(false);  // the flag only: DISABLE itself would clear the queue
+    peer_state(bench).set_homed_z(true);
+    peer_state(bench).set_homed_joints(true);
+    bench.sink.lines.clear();
+    expect(bench.send("MOVE A=1 B=2 F=3"), {"error:6"}, "6 beats 3");
+  }
+  // 4 beats 3: not homed and the queue is full
+  {
+    Bench bench;
+    fill_the_queue(bench);
+    bench.sink.lines.clear();
+    expect(bench.send("MOVE A=1 B=2 F=3"), {"error:4"}, "4 beats 3");
+  }
+}
+
+void test_every_combination_of_estop_drivers_homed_and_queue_matches_the_oracle() {
+  const char* lines[] = {"MOVE A=1 B=2 F=3", "HOME", "HOME Z", "HOME AB", "HOME Z AB"};
+  for (int bits = 0; bits < 16; ++bits) {
+    const bool estop = (bits & 1) != 0;
+    const bool drivers = (bits & 2) != 0;
+    const bool homed = (bits & 4) != 0;
+    const bool full = (bits & 8) != 0;
+    for (const char* line : lines) {
+      Bench bench;
+      if (!drivers) peer_state(bench).set_drivers_enabled(false);
+      if (estop) peer_state(bench).enter_estop();
+      if (homed) {
+        peer_state(bench).set_homed_z(true);
+        peer_state(bench).set_homed_joints(true);
+      }
+      if (full) fill_the_queue(bench);
+      const std::string text = line;
+      const bool is_move = text == "MOVE A=1 B=2 F=3";
+      const bool needs_drivers = is_move || text == "HOME" || text == "HOME AB" || text == "HOME Z AB";
+      const char* want = "error:1";  // the stub of 4a: passed every gate
+      if (estop) {
+        want = "error:5";
+      } else if (needs_drivers && !drivers) {
+        want = "error:6";
+      } else if (is_move && !homed) {
+        want = "error:4";
+      } else if (is_move && full) {
+        want = "error:3";
+      }
+      const std::vector<std::string> got = bench.send(line);
+      if (!same(got, {want})) {
+        const std::string message = text + " estop=" + std::to_string(estop) + " drivers=" + std::to_string(drivers) +
+                                    " homed=" + std::to_string(homed) + " full=" + std::to_string(full) + " want " + want +
+                                    " got " + (got.empty() ? "nothing" : got[0]);
+        TEST_FAIL_MESSAGE(message.c_str());
+      }
+    }
+  }
+}
+
+void test_disable_stops_the_joint_pulses_then_the_pins_and_leaves_z_alone() {
+  Bench bench;
+  expect(bench.send("DISABLE"), {"ok"}, "DISABLE");
+  TEST_ASSERT_EQUAL_INT(2, bench.hardware.events.size());
+  TEST_ASSERT_EQUAL_STRING("pulses", bench.hardware.events[0].c_str());   // pulses first ...
+  TEST_ASSERT_EQUAL_STRING("drivers=0", bench.hardware.events[1].c_str());  // ... then the ENA pins
+  TEST_ASSERT_EQUAL_INT(0, bench.hardware.halts);  // halt_motion_outputs would stop Z too: DISABLE must not call it
+}
+
+void test_enable_does_not_stop_anything() {
+  Bench bench;
+  bench.send("ENABLE");
+  TEST_ASSERT_EQUAL_INT(0, bench.hardware.joint_stops);
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.events.size());
+}
+
+void test_disable_clears_the_whole_queue() {
+  Bench bench;
+  fill_the_queue(bench);
+  TEST_ASSERT_EQUAL_INT(chessbot::config::kQueueDepth, bench.processor.queue().size());
+  expect(bench.send("DISABLE"), {"ok"}, "DISABLE with a full queue");
+  TEST_ASSERT_TRUE(bench.processor.queue().empty());  // discarded, not drained
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.joint_stops);
+}
+
+void test_disable_in_an_estop_also_stops_the_pulses_and_clears_the_queue() {
+  Bench bench;
+  bench.send("ESTOP");
+  fill_the_queue(bench);  // a queue that survived (it cannot in practice): DISABLE must still empty it
+  expect(bench.send("DISABLE"), {"ok"}, "DISABLE in ESTOP");
+  TEST_ASSERT_TRUE(bench.processor.queue().empty());
+  TEST_ASSERT_EQUAL_INT(1, bench.hardware.joint_stops);
+}
+
+void test_every_way_of_clearing_the_queue_empties_it() {
+  // DISABLE, ESTOP, RESET and the heartbeat timeout go through the same clear_motion_queue(): the rule for a pending
+  // WAIT (cancelled, no done) is one rule, in one place.
+  const char* lines[] = {"DISABLE", "ESTOP", "RESET"};
+  for (const char* line : lines) {
+    Bench bench;
+    fill_the_queue(bench);
+    bench.send(line);
+    if (!bench.processor.queue().empty()) TEST_FAIL_MESSAGE(line);
+  }
+  Bench bench;
+  bench.send("PING");
+  fill_the_queue(bench);
+  bench.processor.tick(chessbot::config::kHeartbeatTimeoutMs + 1);
+  TEST_ASSERT_TRUE(bench.processor.queue().empty());
+}
+
+void test_disable_sends_no_done_and_nothing_else() {
+  // 4a has no WAIT or HOME to cancel; this pins that DISABLE answers exactly "ok" (no done, no alarm).
+  Bench bench;
+  fill_the_queue(bench);
+  bench.sink.lines.clear();
+  expect(bench.send("DISABLE"), {"ok"}, "DISABLE");
+  TEST_ASSERT_TRUE(bench.processor.state().alarm_latched(protocol::AlarmCode::kESTOP) == false);
 }
 
 // ---- heartbeat step ------------------------------------------------------------------------------
@@ -535,5 +767,20 @@ int main(int, char**) {
   RUN_TEST(test_a_ping_after_a_heartbeat_timeout_rearms_the_watchdog);
   RUN_TEST(test_commands_still_work_after_a_heartbeat_timeout);
   RUN_TEST(test_a_full_queue_answers_error_3_and_does_not_queue);
+  RUN_TEST(test_move_with_the_drivers_disabled_is_error_6_and_not_queued);
+  RUN_TEST(test_move_with_the_drivers_enabled_and_not_homed_is_error_4);
+  RUN_TEST(test_move_on_a_homed_arm_with_room_passes_the_gates_and_is_the_stub);
+  RUN_TEST(test_move_with_a_full_queue_is_error_3_and_not_queued);
+  RUN_TEST(test_a_home_that_moves_the_joints_is_error_6_while_the_drivers_are_disabled);
+  RUN_TEST(test_home_z_is_not_gated_by_the_drivers_and_never_enables_them);
+  RUN_TEST(test_home_never_enables_the_drivers_even_when_it_is_refused);
+  RUN_TEST(test_the_order_of_checks_error_1_2_then_5_then_6_then_4_then_3);
+  RUN_TEST(test_every_combination_of_estop_drivers_homed_and_queue_matches_the_oracle);
+  RUN_TEST(test_disable_stops_the_joint_pulses_then_the_pins_and_leaves_z_alone);
+  RUN_TEST(test_enable_does_not_stop_anything);
+  RUN_TEST(test_disable_clears_the_whole_queue);
+  RUN_TEST(test_disable_in_an_estop_also_stops_the_pulses_and_clears_the_queue);
+  RUN_TEST(test_every_way_of_clearing_the_queue_empties_it);
+  RUN_TEST(test_disable_sends_no_done_and_nothing_else);
   return UNITY_END();
 }

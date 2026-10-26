@@ -222,6 +222,32 @@ void test_no_heartbeat_alarm_is_sent_in_stage_4a() {
   TEST_ASSERT_TRUE(Serial.tx.empty());
 }
 
+// The driver rules of the phase 4a follow-up through the real main.cpp, the real core and the real BoardHardware: the
+// exact replies of MOVE and HOME while the drivers are disabled / enabled, and that a refusal writes no pin.
+void test_the_driver_gates_answer_through_main_and_write_no_pin() {
+  boot_once();
+  Serial.type("ENABLE\nRESET\n");  // a known start: drivers enabled, no ESTOP
+  loop();
+  Serial.tx.clear();
+  Serial.type("MOVE A=1 B=2 F=3\nHOME\nHOME Z\nHOME AB\nDISABLE\n");
+  loop();
+  // enabled and not homed: MOVE is error:4; the HOME forms pass the gates and are the 4a stub (error:1)
+  TEST_ASSERT_EQUAL_STRING("error:4\nerror:1\nerror:1\nerror:1\nok\n", Serial.tx.c_str());
+  host_arduino::log().clear();
+  Serial.tx.clear();
+  Serial.type("MOVE A=1 B=2 F=3\nHOME\nHOME AB\nHOME Z AB\nHOME Z\nMOVE A=1\nFOO\n");
+  loop();
+  // disabled: error:6 for MOVE and for a HOME that moves the joints; HOME Z passes (stub); parse errors come first
+  TEST_ASSERT_EQUAL_STRING("error:6\nerror:6\nerror:6\nerror:6\nerror:1\nerror:2\nerror:1\n", Serial.tx.c_str());
+  TEST_ASSERT_TRUE(host_arduino::log().empty());  // no refusal touched a pin, and HOME did not enable the drivers
+  Serial.tx.clear();
+  Serial.type("ESTOP\nMOVE A=1 B=2 F=3\nHOME\nHOME Z\n");
+  loop();
+  TEST_ASSERT_EQUAL_STRING("!alarm:ESTOP\nerror:5\nerror:5\nerror:5\n", Serial.tx.c_str());  // 5 comes before 6
+  Serial.type("RESET\nENABLE\n");  // leave the device enabled for later tests
+  loop();
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_the_first_calls_of_setup_are_the_pin_levels_and_serial_comes_after);
@@ -235,5 +261,6 @@ int main(int, char**) {
   RUN_TEST(test_an_overlong_line_gets_one_error_1_and_the_next_line_still_works);
   RUN_TEST(test_a_line_split_across_loop_calls_is_reassembled);
   RUN_TEST(test_no_heartbeat_alarm_is_sent_in_stage_4a);
+  RUN_TEST(test_the_driver_gates_answer_through_main_and_write_no_pin);
   return UNITY_END();
 }

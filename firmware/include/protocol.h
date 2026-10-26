@@ -33,13 +33,25 @@ constexpr char kAlarmPrefix[] = "!alarm:";
   X(BAD_PARAMETER, 2)      \
   X(QUEUE_FULL, 3)         \
   X(NOT_HOMED, 4)          \
-  X(IN_ESTOP, 5)
+  X(IN_ESTOP, 5)           \
+  X(DRIVERS_DISABLED, 6)
 
 enum class ErrorCode : uint8_t {
 #define CB_ERROR_ENUM(name, number) k##name = number,
   CB_ERROR_CODES(CB_ERROR_ENUM)
 #undef CB_ERROR_ENUM
 };
+
+// ---- Order of checks (SPEC 5.2, "Order of checks") --------------------------------------------
+// X(NAME): the first check that fails decides the reply. Same list, same order as CHECK_ORDER in
+// config/protocol_commands.py; a test compares them. The names are the ErrorCode names above.
+#define CB_CHECK_ORDER(X) \
+  X(UNRECOGNIZED)         \
+  X(BAD_PARAMETER)        \
+  X(IN_ESTOP)             \
+  X(DRIVERS_DISABLED)     \
+  X(NOT_HOMED)            \
+  X(QUEUE_FULL)
 
 // ---- Alarm codes: !alarm:<code>, sent asynchronously (SPEC 5.2) -------------------------------
 // X(NAME), in the order of the Python AlarmCode enum.

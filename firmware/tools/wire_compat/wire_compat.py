@@ -12,12 +12,23 @@ What it compares, for every line of every script: the reply lines, in order, and
 
 Scripts:
 * every sequence of up to ``--max-length`` lines (default 4) drawn from INFO, PING, ENABLE, DISABLE, ESTOP,
-  RESET, an unknown command, a bad parameter and a blank line, each on a fresh device (all of the ESTOP and
-  ENABLE / DISABLE state machine);
+  RESET, a well-formed MOVE, an unknown command, a bad parameter and a blank line, each on a fresh device (all of
+  the ESTOP and ENABLE / DISABLE state machine, and the order of checks 5, 6, 4 for a MOVE);
 * the BRINGUP.md session of stage 4a;
-* the ESTOP gate for ALL 15 commands: a fresh ESTOP, then the command.
+* the ESTOP gate for ALL 15 commands: a fresh ESTOP, then the command;
+* the DRIVER GATES: MOVE and every form of HOME (and two bad lines) after each of several preludes (fresh,
+  DISABLE, ESTOP, ESTOP + DISABLE, DISABLE + ENABLE). The reply must be the one the model derives from the fixed
+  order of checks (SPEC 5.2: 1, 2, 5, 6, 4, 3) on the firmware core AND on the simulator; and HOME never changes
+  the drivers (it never enables them).
+
+The model's order is typed out here (OWNER_CHECK_ORDER) and compared with the declared CHECK_ORDER by a test.
 
 Known stage 4a differences, asserted explicitly instead of ignored:
+* A HOME or MOVE that passes every gate: the stage 4a firmware answers error:1 (the stub, nothing queued), the
+  simulator really runs it (``ok``). The driver-gate scripts require exactly that pair of replies, so a HOME that is
+  refused by mistake, or one that sneaks past a gate, is a failure. error:3 (queue full) and the homed flag cannot
+  be reached on the firmware's wire before stage 4b (HOME and MOVE are stubs), so for them the model is used only
+  in the unit tests (tests/test_wire_compat.py, firmware/test/test_processor).
 * ZSTOP and POS are accepted in an ESTOP but are stubs in the firmware (error:1) until a later stage, while the
   simulator implements them. For them the gate check requires "not error:5" on both sides, and error:1 from
   the firmware. When a stage implements them, update STUBS_IN_THE_FIRMWARE below.
@@ -63,11 +74,28 @@ OWNER_ESTOP_SET = frozenset({"ZSTOP", "DISABLE", "POS", "INFO", "PING", "ESTOP",
 # Commands in OWNER_ESTOP_SET that the stage 4a firmware parses but does not implement (it answers error:1).
 STUBS_IN_THE_FIRMWARE = frozenset({"ZSTOP", "POS"})
 
-# Well-formed lines of commands outside the model's own set, used in BRINGUP_SESSION in an ESTOP only.
-VALID_OTHER_LINES = frozenset({"MOVE A=1 B=2 F=3"})
+# The order of checks of SPEC 5.2, as error numbers (owner decision 1 of the phase 4a driver rules): unknown command (1),
+# bad parameter (2), ESTOP (5), drivers disabled (6), not homed (4), queue full (3). Typed out here on purpose; the
+# model below applies it by hand, and tests/test_wire_compat.py compares it with CHECK_ORDER.
+OWNER_CHECK_ORDER = (1, 2, 5, 6, 4, 3)
+
+# Well-formed lines of the commands the model only gates (MOVE and every form of HOME).
+GATED_LINES = frozenset({"MOVE A=1 B=2 F=3", "HOME", "HOME Z", "HOME AB", "HOME Z AB"})
+# Lines that are valid for the parser and that the model answers only through the gates.
+VALID_OTHER_LINES = GATED_LINES
 
 # The lines the exhaustive scripts are built from. "FOO" is an unknown command, "PING x" a bad parameter.
-ALPHABET = ("INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "FOO", "PING x", "")
+ALPHABET = ("INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "MOVE A=1 B=2 F=3", "FOO", "PING x", "")
+
+# The driver-gate scripts: a prelude, then one line. Every prelude is a list of lines of the shared subset.
+GATE_PRELUDES: dict[str, tuple[str, ...]] = {
+    "fresh": (),
+    "disabled": ("DISABLE",),
+    "estop": ("ESTOP",),
+    "estop+disabled": ("ESTOP", "DISABLE"),
+    "disabled, enabled again": ("DISABLE", "ENABLE"),
+}
+GATE_LINES = (*sorted(GATED_LINES), "MOVE A=1", "HOME x")
 
 BRINGUP_SESSION = (
     "INFO", "PING", "ENABLE", "DISABLE", "ENABLE", "ESTOP", "MOVE A=1 B=2 F=3", "ENABLE", "DISABLE", "ESTOP",
@@ -92,6 +120,28 @@ Transcript = list[Step]
 # --------------------------------------------------------------------------- #
 # The model (third witness)
 # --------------------------------------------------------------------------- #
+
+
+def needs_joint_drivers(words: Sequence[str]) -> bool:
+    """MOVE, and HOME with no flag or with AB. ``HOME Z`` moves only Z and needs no joint driver."""
+    return words[0] == "MOVE" or (words[0] == "HOME" and ("AB" in words[1:] or "Z" not in words[1:]))
+
+
+def model_gate_reply(words: Sequence[str], drivers: bool, estop: bool, homed: bool, queue_full: bool) -> Optional[str]:
+    """The reply of the checks 5, 6, 4, 3 (OWNER_CHECK_ORDER) for a well-formed MOVE / HOME line, or None when it passes.
+
+    The checks 1 and 2 (the line itself) are decided before, by the caller. The first check that fails decides.
+    """
+    for number in OWNER_CHECK_ORDER[2:]:
+        if number == 5 and estop and words[0] not in OWNER_ESTOP_SET:
+            return "error:5"
+        if number == 6 and needs_joint_drivers(words) and not drivers:
+            return "error:6"
+        if number == 4 and words[0] == "MOVE" and not homed:
+            return "error:4"
+        if number == 3 and words[0] == "MOVE" and queue_full:
+            return "error:3"
+    return None
 
 
 def model_transcript(script: Sequence[str], firmware_version: str) -> Transcript:
@@ -121,10 +171,12 @@ def model_transcript(script: Sequence[str], firmware_version: str) -> Transcript
         elif words[0] not in COMMANDS:
             replies = ("error:1",)
         elif line in VALID_OTHER_LINES:
-            # A well-formed line of a command the model does not run: the ESTOP gate comes after parsing.
-            if not estop:
-                raise ValueError(f"the model has no answer for {line!r} outside an ESTOP (a stage 4a stub on the firmware)")
-            replies = ("error:5",)
+            # A well-formed MOVE / HOME: only the gates are modelled. The homed flag is never set in these scripts and
+            # the queue is never full, so a MOVE is always refused by one of them; HOME may pass (a stub on the firmware).
+            reply = model_gate_reply(words, drivers, estop, False, False)
+            if reply is None:
+                raise ValueError(f"the model has no answer for {line!r}: it passes every gate (a stage 4a stub on the firmware)")
+            replies = (reply,)
         else:
             replies = ("error:2",)  # a known command with a parameter it does not take or an invalid one
         steps.append(Step(line, replies, drivers, estop, False))  # the homed flag is never set in these scripts
@@ -218,8 +270,8 @@ def line_for(name: str) -> str:
     return " ".join([name, *(f"{p.name}=1" for p in COMMANDS[name].params if p.required)])
 
 
-def build_scripts(max_length: int) -> tuple[list[tuple[str, ...]], dict[str, int]]:
-    """All scripts, and the index of the gate script of each command."""
+def build_scripts(max_length: int) -> tuple[list[tuple[str, ...]], dict[str, int], dict[tuple[str, str], int]]:
+    """All scripts, the index of the ESTOP gate script of each command, and the index of each driver-gate script."""
     scripts: list[tuple[str, ...]] = [BRINGUP_SESSION]
     for length in range(1, max_length + 1):
         scripts.extend(itertools.product(ALPHABET, repeat=length))
@@ -227,7 +279,12 @@ def build_scripts(max_length: int) -> tuple[list[tuple[str, ...]], dict[str, int
     for name in COMMAND_ORDER:
         gate[name] = len(scripts)
         scripts.append(("ESTOP", line_for(name)))
-    return scripts, gate
+    driver_gate: dict[tuple[str, str], int] = {}
+    for prelude_name, prelude in GATE_PRELUDES.items():
+        for line in GATE_LINES:
+            driver_gate[(prelude_name, line)] = len(scripts)
+            scripts.append((*prelude, line))
+    return scripts, gate, driver_gate
 
 
 def describe(steps: Transcript) -> str:
@@ -262,6 +319,36 @@ def check_gate(name: str, firmware: Transcript, simulator: Transcript) -> list[s
     return problems
 
 
+def check_driver_gate(prelude_name: str, line: str, firmware: Transcript, simulator: Transcript) -> list[str]:
+    """One driver-gate script: the replies of both implementations against the model, and HOME never enables."""
+    problems: list[str] = []
+    prelude = list(GATE_PRELUDES[prelude_name])
+    before = model_transcript(prelude, "x")[-1] if prelude else None
+    drivers = before.drivers if before is not None else True
+    estop = before.estop if before is not None else False
+    words = line.split()
+    if line not in GATED_LINES:  # a bad line: the parse checks (1, 2) come before every gate
+        expected: Optional[str] = "error:2"
+    else:
+        expected = model_gate_reply(words, drivers, estop, False, False)
+    where = f"{line!r} after {prelude_name}"
+    fw, sim = list(firmware[-1].replies), list(simulator[-1].replies)
+    if expected is not None:
+        for side, replies in (("firmware core", fw), ("simulator", sim)):
+            if replies != [expected]:
+                problems.append(f"{where} on the {side}: answered {replies}, the model says {expected}")
+    else:  # passed every gate: the 4a firmware stub says error:1, the simulator really runs it
+        if fw != ["error:1"]:
+            problems.append(f"{where} on the firmware core: answered {fw}, expected the error:1 stub (it passes every gate)")
+        # ok, and for a HOME Z that starts with Z already at TOP also the done (the clock never advances here)
+        if not sim or sim[0] != "ok" or any(reply != "done" for reply in sim[1:]):
+            problems.append(f"{where} on the simulator: answered {sim}, expected ok (it passes every gate)")
+    for side, steps in (("firmware core", firmware), ("simulator", simulator)):
+        if steps[-1].drivers != drivers:
+            problems.append(f"{where} on the {side}: the drivers went {drivers} -> {steps[-1].drivers}; HOME and MOVE never change them")
+    return problems
+
+
 @dataclass
 class Report:
     scripts: int
@@ -274,7 +361,7 @@ class Report:
 
 
 def run(cxx: str, firmware_dir: Path, max_length: int) -> Report:
-    scripts, gate = build_scripts(max_length)
+    scripts, gate, driver_gate = build_scripts(max_length)
     with tempfile.TemporaryDirectory() as tmp:
         binary = build_replay(cxx, firmware_dir, Path(tmp))
         version, firmware = run_firmware(binary, scripts)
@@ -292,6 +379,8 @@ def run(cxx: str, firmware_dir: Path, max_length: int) -> Report:
         if name in ("INFO", "PING", "ESTOP", "RESET", "DISABLE"):  # implemented on both sides: exact replies too
             if firmware[index][-1].replies != simulator[index][-1].replies:
                 gate_problems.append(f"{name} in an ESTOP: firmware core {list(firmware[index][-1].replies)} != simulator {list(simulator[index][-1].replies)}")
+    for (prelude_name, line), index in driver_gate.items():
+        gate_problems.extend(check_driver_gate(prelude_name, line, firmware[index], simulator[index]))
     return Report(len(scripts), mismatches, gate_problems)
 
 
@@ -313,9 +402,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if len(report.mismatches) > 5:
         sys.stdout.write(f"... and {len(report.mismatches) - 5} more mismatching scripts\n")
     for problem in report.gate_problems:
-        sys.stdout.write(f"ESTOP GATE: {problem}\n")
+        sys.stdout.write(f"GATE: {problem}\n")
     if report.ok:
-        sys.stdout.write(f"WIRE COMPAT OK: {report.scripts} scripts, C++ core == simulator == model; ESTOP gate checked for all {len(COMMAND_ORDER)} commands\n")
+        sys.stdout.write(f"WIRE COMPAT OK: {report.scripts} scripts, C++ core == simulator == model; ESTOP gate checked for all {len(COMMAND_ORDER)} commands; driver gates checked ({len(GATE_PRELUDES)} preludes x {len(GATE_LINES)} lines)\n")
         return 0
     sys.stdout.write(f"WIRE COMPAT FAILED: {len(report.mismatches)} mismatching scripts, {len(report.gate_problems)} gate problems\n")
     return 1

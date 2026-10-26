@@ -67,6 +67,9 @@ class BoardHardware : public HardwareOps {
   // Stage 4a has no joint pulses and no Z motion to stop; the Z pins are driven to their idle level again
   // so the stop is already wired for the stages that add motion.
   void halt_motion_outputs() override { drive_z_motor_pins_idle(); }
+
+  // DISABLE: stop the joint pulses, leave Z alone. Stage 4a has no joint pulses yet, so there is nothing to stop.
+  void stop_joint_pulses() override {}
 };
 
 SerialSink g_sink;

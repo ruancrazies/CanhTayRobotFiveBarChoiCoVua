@@ -39,6 +39,15 @@ Decisions the SPEC leaves open (reported in the phase 3 summary)
   every chain starts at the park position. So before a chain the Commander checks ``POS`` against the
   chain's first point and refuses to start when the arm is somewhere else.
 * ``F`` is sent in degrees per second.
+* ``HOME`` never enables the drivers (SPEC 5.1), so :meth:`home` sends ``ENABLE`` before it (after ``RESET`` when an
+  alarm is latched): RESET, ENABLE, HOME.
+* The Commander's own ``DISABLE`` (:meth:`disable_drivers`, also a bench ``DISABLE``) ends every pending wait for
+  a ``done``. The firmware cancels the ``done`` of a pending ``WAIT`` and of a ``HOME`` that still had the joints
+  to do (SPEC 5.1, "DISABLE rules"), so waiting for them would hang until the timeout. The operation that was
+  running stops with :class:`OperationAbortedError`; the Commander is no longer homed. A running ``ZUP`` / ``ZDOWN``
+  is NOT cancelled by DISABLE and still sends its ``done``: that one is counted and ignored when it arrives, and
+  no new operation starts until it has (``NotReadyError``), so it cannot be taken for the ``done`` of a later
+  command. An alarm or a lost link resets that count (the firmware stopped everything).
 
 No Qt and no gui imports here; only ``core.event_bus`` and ``core.fsm`` (for the request type) are
 used, and only this module of the ``hardware`` package touches the core.
@@ -95,6 +104,7 @@ _GRIP = CommandName.GRIP.value
 _HOME = CommandName.HOME.value
 _RESET = CommandName.RESET.value
 _DISABLE = CommandName.DISABLE.value
+_ENABLE = CommandName.ENABLE.value
 _ESTOP = CommandName.ESTOP.value
 _ACCEL = CommandName.ACCEL.value
 
@@ -126,6 +136,13 @@ class NotReadyError(CommanderError):
 
 class NotAtStartError(NotReadyError):
     """The arm is not where the chain starts (the park position)."""
+
+
+class OperationAbortedError(CommanderError):
+    """The operation was ended by the Commander's own DISABLE (:meth:`RobotCommander.disable_drivers`).
+
+    Not an alarm: DISABLE is a command, so the FSM is not told. The Commander is no longer homed.
+    """
 
 
 class PlanError(CommanderError):
@@ -316,6 +333,7 @@ class _Request:
     finished: bool = False  # the done arrived (or it never needed one)
     error: Optional[ErrorCode] = None
     data: Optional[DataLine] = None
+    dead: bool = False  # our own DISABLE ended the operation that sent it: its done is not waited for any more
 
     @property
     def answered(self) -> bool:
@@ -342,8 +360,10 @@ class RobotCommander:
         self._op_lock = threading.Lock()
         self._requests: dict[int, _Request] = {}
         self._done_fifo: Deque[_Request] = deque()
-        self._epoch = 0  # bumped by every alarm: an operation that started earlier must stop
+        self._epoch = 0  # bumped by every alarm and by our own DISABLE: an operation that started earlier must stop
         self._last_alarm: Optional[RobotAlarmError] = None
+        self._stop_cause: Optional[CommanderError] = None  # what the last epoch bump was: an alarm or our DISABLE
+        self._stale_z_dones = 0  # dones still owed by a ZUP / ZDOWN that DISABLE did not cancel: ignore them
         self._homed = False
         self._needs_reset = False
         self._bench = False
@@ -490,6 +510,9 @@ class RobotCommander:
             if self._needs_reset:
                 self._finish(self._submit(Command(_RESET, {})), epoch)
                 self._needs_reset = False
+            # HOME never enables the drivers (SPEC 5.1) and a HOME that moves the joints is error:6 while they are
+            # disabled, so the PC enables them first. ENABLE is idempotent, and it comes after RESET (error:5 before).
+            self._finish(self._submit(Command(_ENABLE, {})), epoch)
             self._finish(self._submit(Command(_HOME, {})), epoch)
             self._homed = True
             logger.info("homed")
@@ -529,17 +552,48 @@ class RobotCommander:
             raise CommanderError(f"invalid bench command: {exc}") from exc
         if not self._link.transport.is_simulated:
             logger.warning("BENCH MODE command: %s", command.encode())
+        if name == _DISABLE:
+            self.disable_drivers()  # not behind the operation lock: it ends the operation that holds it
+            return None
         with self._op_lock:
             epoch = self._begin(require_homed=False)
-            try:
-                request = self._finish(self._submit(command), epoch)
-            finally:
-                if name == _DISABLE:
-                    # DISABLE clears the firmware's homed flag (SPEC 5.1). Forget it here too, also when the
-                    # outcome is unknown (a timeout): believing in a homing that is gone is the unsafe error.
-                    with self._cond:
-                        self._homed = False
+            request = self._finish(self._submit(command), epoch)
             return request.data
+
+    def disable_drivers(self) -> None:
+        """DISABLE now, from any thread, and end every pending wait for a ``done`` (SPEC 5.1, "DISABLE rules").
+
+        The firmware stops the joint pulses, clears the whole motion queue, cancels the ``done`` of a pending WAIT and
+        of a HOME that still had the joints to do, and clears its homed flag. So here, BEFORE the command is sent
+        (the outcome of a timeout is unknown, and believing in a homing that is gone is the unsafe error):
+
+        * the Commander forgets its homing;
+        * the running operation, if any, stops with :class:`OperationAbortedError` at its next wait (no hang);
+        * a ``done`` still owed by a ZUP / ZDOWN (DISABLE does not stop Z) is counted and ignored when it arrives.
+
+        Not behind the in-flight window or the operation lock, like the ESTOP.
+
+        Raises:
+            NotReadyError / ReplyTimeoutError: the DISABLE could not be sent (the state above is changed anyway).
+            CommandFailedError: the ESP32 refused it.
+        """
+        with self._cond:
+            self._homed = False
+            for waiting in self._done_fifo:  # acknowledged, done owed
+                waiting.dead = True
+                if waiting.command.name in (_ZUP, _ZDOWN):
+                    self._stale_z_dones += 1  # DISABLE does not cancel the done of a Z move
+            self._done_fifo.clear()
+            for request in self._requests.values():  # not answered yet: _on_reply decides when the answer arrives
+                if not request.answered:
+                    request.dead = True
+            self._stop_cause = OperationAbortedError("the operation was ended by DISABLE")
+            self._epoch += 1
+            epoch = self._epoch
+            self._cond.notify_all()
+        request = self._submit(Command(_DISABLE, {}), urgent=True)
+        self._wait_ok(request, epoch)
+        self._forget(request)
 
     # ------------------------------------------------------------------ #
     # Running a plan
@@ -548,6 +602,10 @@ class RobotCommander:
     def _begin(self, *, require_homed: bool = False) -> int:
         if self._link.state is not LinkState.CONNECTED:
             raise NotReadyError(f"the serial link is {self._link.state.value}")
+        with self._cond:
+            stale = self._stale_z_dones
+        if stale:
+            raise NotReadyError("Z is still finishing the move that was running when DISABLE was sent")
         if require_homed and not self._homed:
             reason = f" after alarm {self._last_alarm.code}" if self._last_alarm else ""
             raise NotReadyError(f"homing is required{reason}")
@@ -644,12 +702,18 @@ class RobotCommander:
         with self._cond:
             self._requests.pop(id(request.command), None)
 
-    def _alarm_since(self, epoch: int) -> Optional[RobotAlarmError]:
-        """A fresh copy of the latest alarm when one was raised after ``epoch`` (call with the lock held)."""
+    def _alarm_since(self, epoch: int) -> Optional[CommanderError]:
+        """A fresh copy of what stopped the operation after ``epoch``: the latest alarm, or our own DISABLE.
+
+        Call with the lock held. (Named for the alarm, which is by far the usual cause.)
+        """
         if self._epoch == epoch:
             return None
-        assert self._last_alarm is not None
-        return RobotAlarmError(self._last_alarm.code, self._last_alarm.detail)
+        cause = self._stop_cause
+        if isinstance(cause, RobotAlarmError):
+            return RobotAlarmError(cause.code, cause.detail)
+        assert cause is not None
+        return OperationAbortedError(str(cause))
 
     def _check_epoch(self, epoch: int) -> None:
         with self._cond:
@@ -673,6 +737,9 @@ class RobotCommander:
         self._wait_for(lambda: request.answered, self._settings.reply_timeout_s, epoch, f"reply to {request.command.name}")
         if request.error is not None:
             self._forget(request)
+            if request.error is ErrorCode.DRIVERS_DISABLED:
+                with self._cond:
+                    self._homed = False  # the drivers are off, so the firmware's homed flag is gone (SPEC 5.1)
             raise CommandFailedError(request.command, request.error)
         return request
 
@@ -774,7 +841,12 @@ class RobotCommander:
                     request.error = response.code
                 elif isinstance(response, (Ok, Alarm)):  # an ESTOP is acknowledged by its alarm
                     request.acknowledged = True
-                    if request.wants_done:
+                    if request.dead:
+                        # Sent before our DISABLE and answered after it. A WAIT or HOME loses its done (SPEC 5.1); the
+                        # done of an accepted ZUP / ZDOWN still comes and must not be taken for a later command's.
+                        if request.wants_done and isinstance(response, Ok) and request.command.name in (_ZUP, _ZDOWN):
+                            self._stale_z_dones += 1
+                    elif request.wants_done:
                         self._done_fifo.append(request)
                     else:
                         request.finished = True
@@ -784,6 +856,10 @@ class RobotCommander:
 
     def _on_done(self) -> None:
         with self._cond:
+            if self._stale_z_dones:
+                self._stale_z_dones -= 1  # the done of a Z move that DISABLE left running: nobody waits for it
+                logger.info("ignored the done of a Z move that was running when DISABLE was sent")
+                return
             if not self._done_fifo:
                 logger.warning("done arrived but no command is waiting for it")
                 return
@@ -794,6 +870,7 @@ class RobotCommander:
         with self._cond:
             self._requests.clear()  # their outcome is unknown; the alarm below releases whoever waits
             self._done_fifo.clear()
+            self._stale_z_dones = 0  # the link is gone: no done will come
         self._raise_alarm(AlarmCode.HB_TIMEOUT.value, f"serial link lost: {message.reason}")
 
     # ------------------------------------------------------------------ #
@@ -809,6 +886,7 @@ class RobotCommander:
             self._homed = False
             self._needs_reset = True
             self._done_fifo.clear()
+            self._stale_z_dones = 0  # an alarm stops Z too: the firmware owes no done any more
         self.alarms_published.append(code)
         if self._bus is not None:
             publish_alarm(self._bus, code)
@@ -817,6 +895,7 @@ class RobotCommander:
     def _abort_operations(self, error: RobotAlarmError) -> None:
         with self._cond:
             self._last_alarm = error
+            self._stop_cause = error
             self._epoch += 1
             self._homed = False
             self._needs_reset = True

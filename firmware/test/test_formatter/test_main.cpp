@@ -28,6 +28,7 @@ void test_every_error_code() {
       {protocol::ErrorCode::kUNRECOGNIZED, "error:1"}, {protocol::ErrorCode::kBAD_PARAMETER, "error:2"},
       {protocol::ErrorCode::kQUEUE_FULL, "error:3"},   {protocol::ErrorCode::kNOT_HOMED, "error:4"},
       {protocol::ErrorCode::kIN_ESTOP, "error:5"},
+      {protocol::ErrorCode::kDRIVERS_DISABLED, "error:6"},
   };
   char line[16];
   for (const auto& c : cases) {

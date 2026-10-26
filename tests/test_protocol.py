@@ -252,9 +252,11 @@ def test_ok_and_done() -> None:
     assert encode_done() == "done" and parse_response("done") == Done()
 
 
-def test_the_declared_error_codes_are_exactly_1_to_5() -> None:
-    assert {int(code) for code in ErrorCode} == {1, 2, 3, 4, 5}
-    assert [code.name for code in ErrorCode] == ["UNRECOGNIZED", "BAD_PARAMETER", "QUEUE_FULL", "NOT_HOMED", "IN_ESTOP"]
+def test_the_declared_error_codes_are_exactly_1_to_6() -> None:
+    assert {int(code) for code in ErrorCode} == {1, 2, 3, 4, 5, 6}
+    assert [code.name for code in ErrorCode] == [
+        "UNRECOGNIZED", "BAD_PARAMETER", "QUEUE_FULL", "NOT_HOMED", "IN_ESTOP", "DRIVERS_DISABLED",
+    ]
 
 
 @pytest.mark.parametrize("code", list(ErrorCode), ids=lambda c: f"error:{int(c)}")
@@ -264,7 +266,7 @@ def test_every_error_code_round_trips(code: ErrorCode) -> None:
     assert parse_response(line) == ErrorResponse(code)
 
 
-@pytest.mark.parametrize("line", ["error:0", "error:6", "error:9", "error:-1", "error:", "error:x", "error:3x", "error: 3x", "ERROR:3"])
+@pytest.mark.parametrize("line", ["error:0", "error:7", "error:9", "error:-1", "error:", "error:x", "error:3x", "error: 3x", "ERROR:3"])
 def test_undeclared_error_codes_are_rejected(line: str) -> None:
     with pytest.raises(ParseError):
         parse_response(line)

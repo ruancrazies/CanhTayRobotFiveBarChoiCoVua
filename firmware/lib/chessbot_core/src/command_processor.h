@@ -3,15 +3,24 @@
 // tests run it with fakes.
 //
 // Stage 4a implements INFO, PING, ENABLE, DISABLE, ESTOP and RESET. The other commands are parsed (a
-// malformed one is error:2) and then answered error:1 ("not implemented yet") until their stage.
+// malformed one is error:2) and then answered error:1 ("not implemented yet") until their stage, EXCEPT that
+// MOVE and HOME already pass through the gates below, so their refusals are real in 4a.
 //
-// Order of checks for a line (same order as the PC simulator, desktop_app/hardware/esp32_simulator.py):
-//   1. blank line: no reply                     2. unknown command: error:1
-//   3. bad parameter: error:2                   4. in ESTOP and not accepted there: error:5
-//   5. the command itself (a stub: error:1)
+// Order of checks for a line (SPEC 5.2, "Order of checks"; CB_CHECK_ORDER in protocol.h; the same order as the
+// PC simulator, desktop_app/hardware/esp32_simulator.py). The first check that fails decides the reply:
+//   0. blank line: no reply                     1. unknown command: error:1
+//   2. bad parameter: error:2                   3. in ESTOP and not accepted there: error:5
+//   4. needs the joint drivers and they are disabled: error:6 (MOVE; HOME with no flag or with AB; not HOME Z)
+//   5. needs a homed arm: error:4 (MOVE)        6. the motion queue is full: error:3 (MOVE)
+//   7. the command itself (a stub in 4a: error:1)
+// "Z not at TOP" (MOVE, HOME AB) belongs to check 5 but needs the Z state, which exists from stage 4b.
 // While the ESTOP flag is set only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted (SPEC 5.1;
-// declared once as CB_ESTOP_ACCEPTED in protocol.h). ENABLE is refused with error:5 until RESET. DISABLE
-// clears the homed flags, in an ESTOP or not.
+// declared once as CB_ESTOP_ACCEPTED in protocol.h). ENABLE is refused with error:5 until RESET.
+//
+// DISABLE (SPEC 5.1, "DISABLE rules") stops the joint pulses, clears the whole motion queue, drives the ENA pins
+// to the disabled level and clears the homed flags. ESTOP, RESET, a heartbeat timeout (and, from 4b, a new HOME)
+// clear the queue through the same clear_motion_queue(), which is also where a pending WAIT loses its done
+// (SPEC 5.1, "Cancelled done"): one rule, one place.
 #ifndef CHESSBOT_COMMAND_PROCESSOR_H
 #define CHESSBOT_COMMAND_PROCESSOR_H
 
@@ -40,6 +49,9 @@ class HardwareOps {
   // Stop every motion output at once: joint pulses and the Z motor. Must NEVER touch the TB6600 ENA pins
   // (SPEC 10.2: the drivers stay enabled in an ESTOP or a heartbeat timeout).
   virtual void halt_motion_outputs() = 0;
+  // Stop the joint pulses only; Z is left alone (DISABLE does not stop a running Z move or a Z-only HOME).
+  // Must not touch the ENA pins either: DISABLE drives those itself, after the pulses have stopped.
+  virtual void stop_joint_pulses() = 0;
 };
 
 // Defined by the unit tests only, to preset the device state (stage 4a has no HOME that could set the homed
@@ -75,6 +87,12 @@ class CommandProcessor {
   void send_error(protocol::ErrorCode code);
   void send_alarm(protocol::AlarmCode code);
   void send_line(bool formatted, const char* line);
+
+  // The one place that empties the motion queue (DISABLE, ESTOP, RESET, heartbeat timeout; a new HOME from 4b).
+  void clear_motion_queue();
+  // The checks 4 to 6 of the order above for a parsed command; true when it may go on to run. Sends the error
+  // itself when it refuses.
+  bool passes_gates(const Command& command);
 
   void do_info();
   void do_ping(uint32_t now_ms);

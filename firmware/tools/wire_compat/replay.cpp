@@ -26,6 +26,7 @@ class NullHardware : public chessbot::HardwareOps {
  public:
   void set_drivers_enabled(bool) override {}
   void halt_motion_outputs() override {}
+  void stop_joint_pulses() override {}
 };
 
 }  // namespace

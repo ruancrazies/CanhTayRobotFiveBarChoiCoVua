@@ -9,5 +9,8 @@ numpy>=1.26
 # Phase 2 onward (the PyPI name of python-chess is "chess")
 chess>=1.10
 
-# Phase 3 onward (serial link to the ESP32; the simulator needs no port)
-pyserial>=3.5
+# Phase 3 onward (serial link to the ESP32; the simulator needs no port).
+# Tested: pyserial 3.5, the newest release and the only one the lower bound allows, with the whole suite including the
+# loop:// transport tests of tests/test_serial_link.py. The upper bound keeps a future 4.x, which may change the
+# Serial API, from being installed unseen: widen it only after running the suite against it.
+pyserial>=3.5,<4

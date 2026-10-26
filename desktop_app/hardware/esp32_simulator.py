@@ -25,12 +25,16 @@ The Z timeout factor and the steps per revolution come from ``config/hardware.ya
 Interpretations the SPEC does not spell out (reported in the phase 3 summary):
 
 * ``F`` is in degrees per second (``ACCEL`` is in deg/s^2). The queue length counts the MOVE being
-  executed. A MOVE is checked in this order: ESTOP (5), parameters and joint limits (2), homed and
-  Z at TOP (4), queue room (3).
+  executed. Every line is checked in the ONE order of SPEC 5.2, ``CHECK_ORDER`` of the declaration, which
+  this module walks itself: unknown command (1), bad parameter or joint limits (2), ESTOP (5), drivers
+  disabled (6, MOVE and a HOME that moves the joints), not homed or Z not at TOP (4), queue full (3).
 * In ESTOP only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted; everything else, ENABLE
-  included, is ``error:5`` until RESET. A repeated ESTOP is answered ``!alarm:ESTOP`` again. DISABLE clears
-  both homed flags (homing is mandatory afterwards) and aborts a HOME that still has the joints to do, as
-  ZSTOP aborts a homing: no ``done``. A Z-only HOME needs no driver and carries on.
+  included, is ``error:5`` until RESET. A repeated ESTOP is answered ``!alarm:ESTOP`` again.
+* DISABLE (SPEC 5.1, "DISABLE rules") stops the joints where they are, clears the WHOLE motion queue (queued
+  MOVEs are discarded, not drained), cancels the ``done`` of every pending WAIT (the same rule as ESTOP,
+  RESET, the heartbeat and a new HOME: a ``done`` is only sent for motion that finished), clears both homed
+  flags, and aborts a HOME that still has the joints to do, as ZSTOP aborts a homing: no ``done``. A Z-only
+  HOME needs no driver and carries on; so does a running ZUP or ZDOWN. HOME never enables the drivers.
   LIMIT_Z is an emergency stop too (SPEC 10.2: "stop at once if triggered by ... LIMIT_Z"), and
   answers with ``!alarm:LIMIT_Z`` only.
 * A Z command while Z is moving replaces the running one (its ``done`` is never sent).
@@ -47,7 +51,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Optional
 
-from config.protocol_commands import ACCEPTED_IN_ESTOP, PROTOCOL_VERSION, AlarmCode, CommandName, ErrorCode, ZState
+from config.protocol_commands import ACCEPTED_IN_ESTOP, CHECK_ORDER, PROTOCOL_VERSION, AlarmCode, CommandName, ErrorCode, ZState
 from desktop_app.hardware.protocol import (
     Command,
     CommandError,
@@ -187,6 +191,7 @@ def _reached(now: float, moment: float) -> bool:
 # and the firmware (CB_ESTOP_ACCEPTED in protocol.h, cross-checked by the tests) cannot drift apart.
 _ALWAYS_ALLOWED_IN_ESTOP = frozenset(ACCEPTED_IN_ESTOP)
 _HOME, _ZUP, _ZDOWN = CommandName.HOME.value, CommandName.ZUP.value, CommandName.ZDOWN.value
+_MOVE = CommandName.MOVE.value
 
 
 class Esp32Simulator:
@@ -214,7 +219,7 @@ class Esp32Simulator:
         self._joints: tuple[float, float] = config.initial_joint_deg
         self._segment: Optional[_Segment] = None
         self._queue: Deque[tuple[float, float, float]] = deque()
-        self._z_pos = _Z_TOP if config.initial_z is ZState.TOP else _Z_BOTTOM
+        self._z_pos = _Z_TOP if config.initial_z == ZState.TOP else _Z_BOTTOM  # ==, not is: ZState is a str enum and a test may pass "TOP"
         self._z_move: Optional[_ZMove] = None
         self._z_stall = False
         self._home_job: Optional[_HomeJob] = None
@@ -235,6 +240,15 @@ class Esp32Simulator:
         self.violations: list[str] = []
         self.trace: list[TraceEvent] = []
         self._hooks: list[Callable[[str], None]] = []
+        # One predicate per ErrorCode that is a gate after parsing; True = refuse with that code. The order comes
+        # from CHECK_ORDER (SPEC 5.2), not from this table.
+        self._gates: dict[ErrorCode, Callable[[Command, float], bool]] = {
+            ErrorCode.BAD_PARAMETER: self._gate_out_of_limits,
+            ErrorCode.IN_ESTOP: self._gate_estop,
+            ErrorCode.DRIVERS_DISABLED: self._gate_drivers,
+            ErrorCode.NOT_HOMED: self._gate_not_homed,
+            ErrorCode.QUEUE_FULL: self._gate_queue_full,
+        }
 
     # ------------------------------------------------------------------ #
     # Read-only view for tests
@@ -437,12 +451,56 @@ class Esp32Simulator:
         self.received.append(line.strip())
         now = self._clock()
         self._tick(now)  # bring time-dependent state up to date before looking at it
-        if self._estop and command.name not in _ALWAYS_ALLOWED_IN_ESTOP:
-            self._error(ErrorCode.IN_ESTOP)
-            return
+        for code in CHECK_ORDER:  # the one order of SPEC 5.2; the first check that fails decides the reply
+            gate = self._gates.get(code)  # UNRECOGNIZED was decided by decode_command above
+            if gate is not None and gate(command, now):
+                self._error(code)
+                return
         getattr(self, f"_cmd_{command.name.lower()}")(command, now)
         for hook in list(self._hooks):
             hook(line.strip())
+
+    # ------------------------------------------------------------------ #
+    # Gates (SPEC 5.2, "Order of checks"): True means "refuse with this code"
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _wants(command: Command) -> tuple[bool, bool]:
+        """(Z part, joint part) of a HOME: no flag means both."""
+        want_z = bool(command.params.get("Z")) or not command.params.get("AB")
+        want_joints = bool(command.params.get("AB")) or not command.params.get("Z")
+        return want_z, want_joints
+
+    def _needs_joint_drivers(self, command: Command) -> bool:
+        if command.name == _MOVE:
+            return True
+        return command.name == _HOME and self._wants(command)[1]
+
+    def _gate_out_of_limits(self, command: Command, _now: float) -> bool:
+        limits = self.config.joint_limits_deg
+        if command.name != _MOVE or limits is None:
+            return False
+        a, b = float(command.params["A"]), float(command.params["B"])
+        return not (limits[0][0] <= a <= limits[0][1] and limits[1][0] <= b <= limits[1][1])
+
+    def _gate_estop(self, command: Command, _now: float) -> bool:
+        return self._estop and command.name not in _ALWAYS_ALLOWED_IN_ESTOP
+
+    def _gate_drivers(self, command: Command, _now: float) -> bool:
+        return self._needs_joint_drivers(command) and not self._drivers_enabled
+
+    def _gate_not_homed(self, command: Command, now: float) -> bool:
+        if command.name == _MOVE:
+            return not self.homed or self._z_state(now) is not ZState.TOP or self._z_move is not None
+        if command.name == _HOME:
+            want_z, want_joints = self._wants(command)
+            if want_joints and not want_z and self._z_state(now) is not ZState.TOP:
+                return True  # the joints may only be homed with Z at TOP
+            return want_joints and self._sensor_fault
+        return False
+
+    def _gate_queue_full(self, command: Command, _now: float) -> bool:
+        return command.name == _MOVE and self.queue_length >= self.config.queue_capacity  # the command is NOT queued
 
     def _ok(self) -> None:
         self._send(encode_ok())
@@ -489,6 +547,9 @@ class Esp32Simulator:
         self._ok()
 
     def _cmd_disable(self, _command: Command, now: float) -> None:
+        # SPEC 5.1, "DISABLE rules": stop the pulses and clear the whole queue (queued MOVEs are discarded, a pending
+        # WAIT loses its done), then the drivers, then the homed flags.
+        self._clear_motion(now)
         self._drivers_enabled = False
         self._homed_z = self._homed_joints = False  # homing is mandatory afterwards (SPEC 5.1)
         if self._home_job is not None and self._home_job.joints:
@@ -497,16 +558,6 @@ class Esp32Simulator:
 
     def _cmd_move(self, command: Command, now: float) -> None:
         a, b, speed = (float(command.params[key]) for key in ("A", "B", "F"))
-        limits = self.config.joint_limits_deg
-        if limits is not None and not (limits[0][0] <= a <= limits[0][1] and limits[1][0] <= b <= limits[1][1]):
-            self._error(ErrorCode.BAD_PARAMETER)
-            return
-        if not self.homed or self._z_state(now) is not ZState.TOP or self._z_move is not None:
-            self._error(ErrorCode.NOT_HOMED)
-            return
-        if self.queue_length >= self.config.queue_capacity:
-            self._error(ErrorCode.QUEUE_FULL)  # the command is NOT queued
-            return
         self._queue.append((a, b, speed))
         self._ok()
         self._tick(now)
@@ -542,14 +593,7 @@ class Esp32Simulator:
             self._home_job = None  # a stopped Z aborts homing: it never completes
 
     def _cmd_home(self, command: Command, now: float) -> None:
-        want_z = bool(command.params.get("Z")) or not command.params.get("AB")
-        want_joints = bool(command.params.get("AB")) or not command.params.get("Z")
-        if want_joints and not want_z and self._z_state(now) is not ZState.TOP:
-            self._error(ErrorCode.NOT_HOMED)  # the joints may only be homed with Z at TOP
-            return
-        if want_joints and self._sensor_fault:
-            self._error(ErrorCode.NOT_HOMED)
-            return
+        want_z, want_joints = self._wants(command)  # the gates have run: drivers (6) and not-homed (4) are fine
         self._ok()
         self._clear_motion(now)
         self._freeze_z(now)  # a Z move already running is replaced (this also drops an older homing job)
@@ -582,7 +626,11 @@ class Esp32Simulator:
     # ------------------------------------------------------------------ #
 
     def _clear_motion(self, now: float) -> None:
-        """Stop both joints where they are and forget the queue and every owed ``done`` of the joints."""
+        """Stop both joints where they are and forget the queue and every owed ``done`` of the joints.
+
+        The one place that clears the queue (DISABLE, ESTOP, RESET, the heartbeat, a new HOME, a sensor fault):
+        a WAIT that is pending is cancelled with it and never sends its ``done`` (SPEC 5.1, "Cancelled done").
+        """
         self._joints = self._joint_now(now)
         self._segment = None
         self._queue.clear()

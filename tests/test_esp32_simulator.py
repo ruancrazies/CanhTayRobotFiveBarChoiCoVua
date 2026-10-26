@@ -105,12 +105,14 @@ def test_a_garbage_line_does_not_stop_the_next_one() -> None:
     assert bench.send("\xff\xfe", "PING") == ["error:1", "ok"]  # non-ASCII bytes are an unrecognized command
 
 
-def test_all_five_error_codes_can_be_produced() -> None:
+def test_all_six_error_codes_can_be_produced() -> None:
     bench = Bench(queue_capacity=1)
     seen = {ErrorCode.UNRECOGNIZED: bench.send("FOO"), ErrorCode.BAD_PARAMETER: bench.send("GRIP"), ErrorCode.NOT_HOMED: bench.send(MOVE_10)}
     bench.home()
     assert bench.send(MOVE_10) == ["ok"]
     seen[ErrorCode.QUEUE_FULL] = bench.send(MOVE_10)
+    bench.send("DISABLE")
+    seen[ErrorCode.DRIVERS_DISABLED] = bench.send(MOVE_10)
     bench.send("ESTOP")
     seen[ErrorCode.IN_ESTOP] = bench.send("ZUP")
     assert {code: lines for code, lines in seen.items()} == {code: [f"error:{int(code)}"] for code in ErrorCode}
@@ -285,8 +287,11 @@ def test_move_checks_run_in_the_documented_order() -> None:
     assert bench.send("MOVE A=99.9 B=40 F=20") == ["error:2"]
     assert bench.send("MOVE A=200 B=0 F=20") == ["ok"]  # the limits are inclusive
     assert bench.send("MOVE A=160 B=40 F=20") == ["error:3"]
+    # SPEC 5.2 puts error:2 (a parameter check, joint limits included) BEFORE the ESTOP check: an out-of-range value is
+    # error:2 even in an ESTOP, like any other bad parameter (owner decision 1, phase 4a driver rules).
     bench.send("ESTOP")
-    assert bench.send("MOVE A=300 B=40 F=20") == ["error:5"]  # ESTOP beats everything
+    assert bench.send("MOVE A=300 B=40 F=20") == ["error:2"]
+    assert bench.send("MOVE A=160 B=40 F=20") == ["error:5"]  # a valid MOVE in an ESTOP: error:5
 
 
 def test_without_limits_no_joint_limit_is_invented() -> None:
@@ -554,7 +559,7 @@ def test_disable_clears_the_homed_flag_and_enable_does_not_restore_it() -> None:
     bench.advance(5.0)
     assert bench.send("DISABLE") == ["ok"]
     assert not bench.sim.homed
-    assert bench.send(MOVE_10) == ["error:4"]
+    assert bench.send(MOVE_10) == ["error:6"]  # the drivers are off: error:6 comes before error:4
     assert bench.send("ENABLE") == ["ok"]
     assert not bench.sim.homed
     assert bench.send(MOVE_10) == ["error:4"]  # ENABLE does not give the homing back
@@ -584,7 +589,7 @@ def test_disable_aborts_a_homing_that_still_needs_the_joints() -> None:
         assert bench.send("DISABLE") == ["ok"]
         assert bench.advance(10.0) == [], f"an aborted homing must never send done ({initial_z}, {advance_s} s)"
         assert not bench.sim.homed
-        assert bench.send(MOVE_10) == ["error:4"]
+        assert bench.send(MOVE_10) == ["error:6"]  # drivers disabled (and not homed): error:6 first
 
 
 def test_disable_does_not_stop_a_z_only_homing_because_z_needs_no_driver() -> None:

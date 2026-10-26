@@ -1,8 +1,8 @@
 """The single declaration of the serial protocol (docs/SPEC.md section 5, SPEC rule 6).
 
 Everything the PC side knows about the wire format is declared here and nowhere else: the
-commands and their parameters, the response types, the error codes 1 to 5, the alarm codes and
-which commands are still accepted while the ESTOP flag is set. ``desktop_app/hardware/protocol.py``
+commands and their parameters, the response types, the error codes 1 to 6, the order in which they are
+checked, the alarm codes and which commands are still accepted while the ESTOP flag is set. ``desktop_app/hardware/protocol.py``
 (encoder and parser), the ESP32 simulator and the tests all build on this module.
 ``firmware/include/protocol.h`` (phase 4) must declare the same thing; the cross-check test in
 ``tests/test_protocol_declaration.py`` compares them, and compares both with the SPEC text.
@@ -26,6 +26,9 @@ if the owner decides otherwise):
 * ``ZUP``, ``ZDOWN``, ``HOME`` and ``WAIT`` are acknowledged by ``ok`` and later completed by an
   asynchronous ``done``. ``MOVE`` has no ``done``: the PC uses ``WAIT`` to learn that the queue
   drained. ``done`` carries no tag, so the PC keeps only one completion command outstanding.
+* A ``done`` is cancelled, never sent, when the motion it waits for is stopped without finishing: ``DISABLE``,
+  ``ESTOP``, ``RESET``, a heartbeat timeout and a new ``HOME`` cancel the ``done`` of a pending ``WAIT`` (the
+  queue is cleared), and ``DISABLE`` cancels the ``done`` of a ``HOME`` that still has the joints to do (SPEC 5.1).
 * ``POS`` and ``INFO`` answer with one data line and then ``ok``. The SPEC lists what each
   contains but not the syntax; the key names below are this declaration's proposal.
 """
@@ -76,6 +79,21 @@ class ErrorCode(IntEnum):
     QUEUE_FULL = 3  # the motion queue is full; the command was NOT queued
     NOT_HOMED = 4  # not homed (for MOVE also: Z not at TOP)
     IN_ESTOP = 5  # the ESTOP flag is set
+    DRIVERS_DISABLED = 6  # the joint drivers are disabled (MOVE, and HOME when it moves the joints)
+
+
+# The ORDER in which a received line is checked; the first check that fails decides the reply (SPEC 5.2, "Order of
+# checks"). The firmware core, the ESP32 simulator and the wire_compat model all follow it, and
+# firmware/include/protocol.h (CB_CHECK_ORDER) is compared with it by a test. The simulator walks this tuple
+# itself, so it cannot be reordered on one side only.
+CHECK_ORDER: tuple[ErrorCode, ...] = (
+    ErrorCode.UNRECOGNIZED,  # 1. unknown command name
+    ErrorCode.BAD_PARAMETER,  # 2. missing, malformed or out-of-range parameter
+    ErrorCode.IN_ESTOP,  # 3. the ESTOP flag is set and the command is not accepted in an ESTOP
+    ErrorCode.DRIVERS_DISABLED,  # 4. the command needs the joint drivers and they are disabled
+    ErrorCode.NOT_HOMED,  # 5. the command needs a homed arm (MOVE; HOME AB also needs Z at TOP)
+    ErrorCode.QUEUE_FULL,  # 6. the motion queue has no room
+)
 
 
 class AlarmCode(str, Enum):
@@ -161,22 +179,27 @@ def _float(name: str, *, minimum: Optional[float] = None, maximum: Optional[floa
 
 
 _COMMAND_LIST: tuple[CommandSpec, ...] = (
-    CommandSpec(CommandName.HOME.value, (_flag("Z"), _flag("AB")), "Homing; no flag = Z first, then both joints", completion=Completion.DONE),
+    CommandSpec(
+        CommandName.HOME.value,
+        (_flag("Z"), _flag("AB")),
+        "Homing; no flag = Z first, then both joints. Needs the drivers enabled when it moves the joints (error:6)",
+        completion=Completion.DONE,
+    ),
     CommandSpec(
         CommandName.MOVE.value,
         (_float("A"), _float("B"), _float("F", positive=True)),
-        "Queue a move of both joints to alpha (A) and beta (B) at speed F; no Z parameter",
+        "Queue a move of both joints to alpha (A) and beta (B) at speed F; no Z parameter; needs the drivers enabled (error:6)",
     ),
     CommandSpec(CommandName.ZUP.value, (), "Raise Z until limit #1 triggers", completion=Completion.DONE),
     CommandSpec(CommandName.ZDOWN.value, (), "Lower Z until limit #2 triggers", completion=Completion.DONE),
     CommandSpec(CommandName.ZSTOP.value, (), "Stop and brake Z immediately", accepted_in_estop=True),
     CommandSpec(CommandName.ACCEL.value, (_float("S", positive=True),), "Acceleration for the following segments"),
     CommandSpec(CommandName.GRIP.value, (_float("S", minimum=0.0, maximum=180.0),), "Gripper servo angle in degrees"),
-    CommandSpec(CommandName.ENABLE.value, (), "Enable both TB6600 drivers (error:5 in an ESTOP, until RESET)"),
+    CommandSpec(CommandName.ENABLE.value, (), "Enable both TB6600 drivers (error:5 in an ESTOP, until RESET); HOME never does it"),
     CommandSpec(
         CommandName.DISABLE.value,
         (),
-        "Disable both TB6600 drivers and clear the homed flag; accepted in an ESTOP",
+        "Disable both TB6600 drivers, stop the joint pulses, clear the motion queue and the homed flag; accepted in an ESTOP",
         accepted_in_estop=True,
     ),
     CommandSpec(CommandName.WAIT.value, (), "Wait for the motion queue to drain", completion=Completion.DONE),
@@ -236,6 +259,7 @@ def declaration_as_dict() -> dict[str, Any]:
         "protocol_version": PROTOCOL_VERSION,
         "responses": {"ok": RESPONSE_OK, "done": RESPONSE_DONE, "error_prefix": ERROR_PREFIX, "alarm_prefix": ALARM_PREFIX},
         "error_codes": {code.name: int(code) for code in ErrorCode},
+        "check_order": [code.name for code in CHECK_ORDER],
         "alarm_codes": [code.value for code in AlarmCode],
         "z_states": [state.value for state in ZState],
         "accepted_in_estop": list(ACCEPTED_IN_ESTOP),

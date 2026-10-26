@@ -187,7 +187,8 @@ def test_recovery_after_a_fault_before_any_motion(tmp_path: Path) -> None:
         stack.commander.home()
         names = [line.split()[0] for line in stack.sim.received if line.split()[0] != CommandName.PING.value]
         assert names.index(CommandName.RESET.value) < len(names) - 1
-        assert names[-1] == CommandName.HOME.value and names[-2] == CommandName.RESET.value
+        # RESET, then ENABLE (HOME never enables the drivers, SPEC 5.1), then HOME
+        assert names[-3:] == [CommandName.RESET.value, CommandName.ENABLE.value, CommandName.HOME.value]
         assert stack.fsm.handle(Trigger.HOMING_DONE).accepted
         stack.redo_pending()  # SETUP_CHECK, then START(pending="redo"): the engine move was kept
 
