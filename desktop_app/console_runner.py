@@ -9,9 +9,9 @@ Run from the repository root::
 
     python -m desktop_app.console_runner --color white --mode beginner --demo-placeholders
 
-The capture/reserve/park layout comes from ``Zones.proposed`` (the owner's proposal, still
-[TO CONFIRM]). The gripper angles and the content of each reserve slot are also [TO CONFIRM]
-and are NOT in config yet, so ``--demo-placeholders`` substitutes clearly marked placeholders.
+The capture/reserve/park layout, the gripper angles and the content of each reserve slot come from
+config/settings.yaml. While any of them is listed in its ``assumed`` list (not confirmed on the real board) the
+runner refuses to start, unless ``--demo-placeholders`` says the assumed values may be used.
 
 Commands while it is your turn: a move, ``moves``, ``pause`` (then ``resume``), ``alarm <CODE>``
 (simulates ESTOP, HB_TIMEOUT, SENSOR_FAULT, CAMERA_LOST, ...), ``quit``.
@@ -32,11 +32,10 @@ from typing import Callable, Optional, Protocol, Sequence, TextIO
 
 import chess
 
-from desktop_app.core.engine import Engine, EngineError, load_engine_config
+from desktop_app.core.engine import MODE_KEYS, Engine, EngineError, engine_config_from_settings
 from desktop_app.core.fsm import ALARM_CODES, Fsm, State, Trigger
-from desktop_app.core.game_state import DEFAULT_GAMES_DIR, GameState, MoveSource
+from desktop_app.core.game_state import GameState, MoveSource, default_games_dir
 from desktop_app.core.move_planner import (
-    DEFAULT_GRASP_PROFILES_PATH,
     GraspProfiles,
     GripAction,
     GripStep,
@@ -44,25 +43,17 @@ from desktop_app.core.move_planner import (
     MovePlanError,
     MovePlanner,
     MoveStep,
-    ReserveSlot,
     ZDownStep,
     ZoneInventory,
     ZUpStep,
+    reserve_slots_from_settings,
 )
 from desktop_app.kinematics.dimension import BoardGeometry, Workspace, Zones
 from desktop_app.kinematics.five_bar import FiveBarKinematics
-from desktop_app.utils.hardware_config import load_hardware_config
 from desktop_app.utils.logging_setup import configure_logging
+from desktop_app.utils.settings import ConfigError, get_settings, load_settings
 
 logger = logging.getLogger(__name__)
-
-# PLACEHOLDERS, [TO CONFIRM] with the hardware owner. Used only with --demo-placeholders and
-# never written to config/. They exist so the console game can run before the real values do.
-PLACEHOLDER_GRASP = {
-    "open_deg": 90,
-    "close_deg": {"P": 60, "N": 60, "B": 60, "R": 60, "Q": 60, "K": 60},
-}
-PLACEHOLDER_RESERVE_PIECES = (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT)
 
 
 class EngineLike(Protocol):
@@ -523,7 +514,7 @@ class ConsoleGame:
         self._say(str(self.game.board))
         self._say(f"Game over: {outcome.result} ({outcome.termination}).")
         if self.game.data_dir is not None:
-            self._say(f"PGN saved in {self.game.data_dir / 'current.pgn'}")
+            self._say(f"PGN saved in {self.game.data_dir / get_settings().paths.pgn_file}")
         return RunResult(0, State.GAME_OVER, f"{outcome.result} {outcome.termination}")
 
 
@@ -535,10 +526,14 @@ class ConsoleGame:
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play one console game against Stockfish with the Move Planner.")
     parser.add_argument("--color", choices=("white", "black"), default="white", help="your side")
-    parser.add_argument("--mode", choices=("beginner", "amateur", "player", "master", "grandmaster"), default=None)
-    parser.add_argument("--data-dir", type=Path, default=DEFAULT_GAMES_DIR, help="where current.fen/pgn/pending.json go")
+    parser.add_argument("--mode", choices=MODE_KEYS, default=None)
+    parser.add_argument("--data-dir", type=Path, default=None, help="where the saved game goes (default: paths.games_dir of settings.yaml)")
     parser.add_argument("--new", action="store_true", help="ignore a saved game and start a new one")
-    parser.add_argument("--demo-placeholders", action="store_true", help="use placeholder gripper angles and reserve contents")
+    parser.add_argument(
+        "--demo-placeholders",
+        action="store_true",
+        help="allow the assumed (unconfirmed) gripper angles, reserve contents and layout of settings.yaml",
+    )
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="WARNING")
     return parser.parse_args(argv)
 
@@ -548,43 +543,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     configure_logging(getattr(logging, args.log_level))
     out = sys.stdout
 
-    if DEFAULT_GRASP_PROFILES_PATH.exists():
-        grasp = GraspProfiles.from_file()
-    elif args.demo_placeholders:
-        grasp = GraspProfiles.from_dict(PLACEHOLDER_GRASP, placeholder=True)
-    else:
-        out.write(
-            "config/grasp_profiles.json does not exist and the gripper angles are [TO CONFIRM].\n"
-            "Ask the hardware owner, or run with --demo-placeholders to use clearly marked placeholders.\n"
-        )
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        out.write(f"Cannot start: {exc}\n")
         return 2
-    if not args.demo_placeholders:
-        out.write(
-            "The content of each reserve slot is [TO CONFIRM] and not in config yet; "
-            "run with --demo-placeholders to use placeholder reserve pieces.\n"
-        )
-        return 2
-    out.write(
-        "NOTE: placeholder values in use: reserve slot pieces "
-        f"{[chess.piece_name(p) for p in PLACEHOLDER_RESERVE_PIECES]}"
-        + (", gripper angles" if not DEFAULT_GRASP_PROFILES_PATH.exists() else "")
-        + ". Capture/reserve/park coordinates are the owner's PROPOSED layout. All are [TO CONFIRM].\n"
+    workspace = Workspace(FiveBarKinematics.from_config(settings))
+    geometry = BoardGeometry.from_config(settings)
+    zones = Zones.from_settings(geometry, workspace, settings)
+    planner = MovePlanner(
+        workspace,
+        geometry,
+        zones,
+        GraspProfiles.from_settings(settings),
+        reserve_pieces=reserve_slots_from_settings(settings),
     )
+    assumed = tuple(key for prefix in ("grasp", "layout") for key in settings.assumed_under(prefix))
+    if planner.placeholders() and not args.demo_placeholders:
+        out.write(
+            "These values in config/settings.yaml are still assumed (not confirmed on the real board): "
+            f"{', '.join(assumed)}.\n"
+            "Ask the hardware owner, or run with --demo-placeholders to use the assumed values.\n"
+        )
+        return 2
+    if planner.placeholders():
+        out.write(
+            "NOTE: placeholder values in use (assumed in settings.yaml, not confirmed): reserve slot pieces "
+            f"{[chess.piece_name(p) for p in planner.reserve_pieces]}, gripper angles, capture/reserve/park layout.\n"
+        )
+        out.write(f"Still placeholders (a real serial port would be refused): {', '.join(planner.placeholders())}.\n")
 
-    hardware = load_hardware_config()
-    workspace = Workspace(FiveBarKinematics.from_config(hardware))
-    geometry = BoardGeometry.from_config(hardware)
-    zones = Zones.proposed(geometry, workspace)
-    reserve = tuple(ReserveSlot(piece_type, is_placeholder=True) for piece_type in PLACEHOLDER_RESERVE_PIECES)
-    planner = MovePlanner(workspace, geometry, zones, grasp, reserve_pieces=reserve)
-    out.write(f"Still placeholders (a real serial port would be refused): {', '.join(planner.placeholders())}.\n")
-
-    game = None if args.new else GameState.load(args.data_dir)
+    data_dir = args.data_dir if args.data_dir is not None else default_games_dir()
+    game = None if args.new else GameState.load(data_dir)
     if game is None:
-        game = GameState.new_game(args.data_dir)
+        game = GameState.new_game(data_dir)
     inventory = ZoneInventory.from_history(game.history, planner.reserve_pieces)
 
-    engine = Engine(load_engine_config(), mode=args.mode)
+    engine = Engine(engine_config_from_settings(settings), mode=args.mode)
     try:
         runner = ConsoleGame(
             game=game, engine=engine, planner=planner, fsm=Fsm(), input_fn=input, out=out, inventory=inventory

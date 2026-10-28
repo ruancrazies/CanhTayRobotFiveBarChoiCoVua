@@ -25,8 +25,10 @@ Assumptions the SPEC does not spell out (flagged in the phase 2 report):
   * the reserve zone holds spare pieces of the robot's own colour, one per slot, and the piece
     type of each slot is given to the planner (``reserve_pieces``);
   * grasp angles, reserve slot contents and the capture/reserve/park layout stay PLACEHOLDERS until
-    phase 5. They are fail-safe: a value is real only when it says so (``GraspProfiles.from_file``,
-    ``ReserveSlot(is_placeholder=False)`` or ``Zones(is_placeholder=False)``).
+    phase 5. They are fail-safe: a value is real only when it says so (``GraspProfiles(is_placeholder=False)``,
+    ``ReserveSlot(is_placeholder=False)`` or ``Zones(is_placeholder=False)``). The ones built from config/settings.yaml
+    (``GraspProfiles.from_settings``, ``reserve_slots_from_settings``, ``Zones.from_settings``) are placeholders
+    while their keys are listed in ``assumed``.
     ``MovePlanner.placeholders()`` lists what is still a placeholder, so the phase 3 Robot
     Commander can see it before it drives a real serial port;
   * the arm starts every chain at the park position and ``MoveChain.park_leg`` is the validated
@@ -35,12 +37,11 @@ Assumptions the SPEC does not spell out (flagged in the phase 2 report):
 
 from __future__ import annotations
 
-import json
 import logging
 import math
+import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
 import chess
@@ -48,12 +49,10 @@ import chess
 from desktop_app.core.game_state import MoveRecord, MoveSource
 from desktop_app.kinematics.dimension import BoardGeometry, Workspace, Zones
 from desktop_app.kinematics.five_bar import KinematicsError, Point
-from desktop_app.kinematics.trajectory import DEFAULT_MAX_SEGMENT_MM, Trajectory, straight_line
+from desktop_app.kinematics.trajectory import Trajectory, straight_line
+from desktop_app.utils.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_GRASP_PROFILES_PATH = REPO_ROOT / "config" / "grasp_profiles.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -74,11 +73,11 @@ class ReservePieceUnavailableError(MovePlanError):
 
 
 class GraspProfilesError(MovePlanError):
-    """config/grasp_profiles.json is missing or invalid ([TO CONFIRM] values)."""
+    """The grasp angles are invalid."""
 
 
 # --------------------------------------------------------------------------- #
-# Grasp profiles (config/grasp_profiles.json)
+# Grasp profiles (the ``grasp`` section of config/settings.yaml)
 # --------------------------------------------------------------------------- #
 
 
@@ -86,19 +85,20 @@ class GraspProfilesError(MovePlanError):
 class GraspProfiles:
     """Gripper angles: one closing angle per piece type and one opening angle.
 
-    File format (all angles are servo degrees)::
+    Shape of the data (all angles are servo degrees)::
 
         {"open_deg": <number>, "close_deg": {"P": <n>, "N": <n>, "B": <n>, "R": <n>, "Q": <n>, "K": <n>}}
 
-    The values are hardware-dependent and [TO CONFIRM]: this module never invents them. The
-    servo range itself is enforced by the firmware (``GRIP`` is rejected out of range).
+    The values are hardware-dependent and assumed until measured: this module never invents them, they come
+    from the ``grasp`` section of config/settings.yaml. The servo range itself is enforced by the firmware
+    (``GRIP`` is rejected out of range).
     """
 
     open_deg: float
     close_deg: Mapping[chess.PieceType, float]
-    # Fail-safe: a profile is real only when it was loaded from config/grasp_profiles.json
-    # (``from_file``). Anything else (demo values, test values, a hand-built object) is a
-    # placeholder until phase 5, and the phase 3 Robot Commander must not drive a real port with it.
+    # Fail-safe: a profile is real only when it comes from settings.yaml with every ``grasp`` key removed from
+    # ``assumed`` (``from_settings``). Anything else (demo values, test values, a hand-built object) is a
+    # placeholder, and the Robot Commander must not drive a real port with it.
     is_placeholder: bool = True
 
     @classmethod
@@ -122,19 +122,17 @@ class GraspProfiles:
         )
 
     @classmethod
-    def from_file(cls, path: Optional[Path] = None) -> "GraspProfiles":
-        source = Path(path) if path is not None else DEFAULT_GRASP_PROFILES_PATH
-        if not source.exists():
-            raise GraspProfilesError(
-                f"{source} does not exist. The gripper angles are hardware values and [TO CONFIRM]; "
-                "ask the hardware owner and create the file"
-            )
-        try:
-            return cls.from_dict(json.loads(source.read_text(encoding="utf-8")), placeholder=False)
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, GraspProfilesError):
-                raise
-            raise GraspProfilesError(f"cannot read {source}: {exc}") from exc
+    def from_settings(cls, config: Optional[Settings] = None) -> "GraspProfiles":
+        """The angles of settings.yaml; a placeholder while any ``grasp`` key is listed in ``assumed``."""
+        cfg = config if config is not None else get_settings()
+        close = cfg.grasp.close_deg
+        return cls.from_dict(
+            {
+                "open_deg": cfg.grasp.open_deg,
+                "close_deg": {f.name: getattr(close, f.name) for f in dataclasses.fields(close)},
+            },
+            placeholder=bool(cfg.assumed_under("grasp")),
+        )
 
     def close_angle(self, piece_type: chess.PieceType) -> float:
         return self.close_deg[piece_type]
@@ -155,6 +153,16 @@ class ReserveSlot:
 
     piece_type: chess.PieceType
     is_placeholder: bool = True
+
+
+def reserve_slots_from_settings(config: Optional[Settings] = None) -> tuple[ReserveSlot, ...]:
+    """The spare piece of each reserve slot (``layout.reserve_pieces``); placeholders while that key is assumed."""
+    cfg = config if config is not None else get_settings()
+    placeholder = cfg.is_assumed("layout.reserve_pieces")
+    return tuple(
+        ReserveSlot(chess.Piece.from_symbol(symbol).piece_type, is_placeholder=placeholder)
+        for symbol in cfg.layout.reserve_pieces
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -351,7 +359,7 @@ class MovePlanner:
         reserve_pieces: the spare piece in each reserve slot, in the order of ``zones.reserve_zone``.
             Required when the reserve zone is defined. Each item is a :class:`ReserveSlot`, or a
             bare piece type, which counts as a PLACEHOLDER slot.
-        ds: maximum straight-line segment length in mm.
+        ds: maximum straight-line segment length in mm (default: motion.trajectory_step_mm of the settings).
     """
 
     def __init__(
@@ -362,13 +370,13 @@ class MovePlanner:
         grasp: GraspProfiles,
         *,
         reserve_pieces: Optional[Sequence[Union[chess.PieceType, ReserveSlot]]] = None,
-        ds: float = DEFAULT_MAX_SEGMENT_MM,
+        ds: Optional[float] = None,
     ) -> None:
         self._workspace = workspace
         self._geometry = geometry
         self._zones = zones
         self._grasp = grasp
-        self._ds = ds
+        self._ds = ds if ds is not None else get_settings().motion.trajectory_step_mm
         self._reserve_slots: tuple[ReserveSlot, ...] = tuple(
             item if isinstance(item, ReserveSlot) else ReserveSlot(item) for item in (reserve_pieces or ())
         )

@@ -8,7 +8,6 @@ meaning of the chain, not only its shape.
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +22,6 @@ from desktop_app.core.move_planner import (
     GraspProfilesError,
     GripAction,
     GripStep,
-    Location,
     LocationKind,
     MoveChain,
     MovePlanError,
@@ -35,14 +33,9 @@ from desktop_app.core.move_planner import (
     ZoneInventory,
     ZUpStep,
 )
-from desktop_app.kinematics.dimension import (
-    PROPOSED_CAPTURE_SLOTS,
-    PROPOSED_PARK_POSITION,
-    PROPOSED_RESERVE_SLOTS,
-    Workspace,
-)
+from desktop_app.kinematics.dimension import Workspace
 from desktop_app.kinematics.five_bar import FiveBarKinematics, OutOfReachError
-from phase2_support import TEST_GRASP, TEST_RESERVE, make_geometry, make_planner, make_workspace, make_zones
+from phase2_support import CAPTURE_SLOTS, PARK_POSITION, RESERVE_SLOTS, TEST_GRASP, TEST_RESERVE, make_geometry, make_planner, make_workspace, make_zones
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UCI = chess.Move.from_uci
@@ -124,7 +117,7 @@ def test_trajectories_are_straight_lines_validated_end_to_end() -> None:
     _, chain = plan(NORMAL)
     first, second = [s for s in chain.steps if isinstance(s, MoveStep)]
     # leg 1 starts at the park position (the arm rests there between moves), leg 2 at e2
-    assert tuple(first.trajectory.points_xy[0]) == pytest.approx(PROPOSED_PARK_POSITION)
+    assert tuple(first.trajectory.points_xy[0]) == pytest.approx(PARK_POSITION)
     assert tuple(second.trajectory.points_xy[0]) == pytest.approx(first.target.xy)
     assert tuple(second.trajectory.points_xy[-1]) == pytest.approx(second.target.xy)
     for step in (first, second, chain.park_leg):
@@ -134,7 +127,7 @@ def test_trajectories_are_straight_lines_validated_end_to_end() -> None:
 def test_park_leg_returns_to_the_park_position() -> None:
     _, chain = plan(NORMAL)
     assert chain.park_leg.target.kind is LocationKind.PARK
-    assert tuple(chain.park_leg.trajectory.points_xy[-1]) == pytest.approx(PROPOSED_PARK_POSITION)
+    assert tuple(chain.park_leg.trajectory.points_xy[-1]) == pytest.approx(PARK_POSITION)
     assert tuple(chain.park_leg.trajectory.points_xy[0]) == pytest.approx(chain.transfers[-1].target.xy)
 
 
@@ -162,7 +155,7 @@ def test_capture_removes_the_captured_piece_first() -> None:
     assert (first.role, first.piece_type) == (TransferRole.CAPTURED_PIECE, chess.PAWN)
     assert (first.source.name, first.target.name) == ("d5", "capture_slot[0]")
     assert first.target.kind is LocationKind.CAPTURE_SLOT
-    assert first.target.xy == PROPOSED_CAPTURE_SLOTS[0]
+    assert first.target.xy == CAPTURE_SLOTS[0]
     assert (second.role, second.source.name, second.target.name) == (TransferRole.MOVING_PIECE, "e4", "d5")
     assert chain.capture_slots_used == (0,)
 
@@ -200,7 +193,7 @@ def test_promotion_takes_the_new_piece_from_the_reserve_zone() -> None:
     assert (pawn.role, pawn.source.name, pawn.target.kind) == (TransferRole.PROMOTED_PAWN, "a7", LocationKind.CAPTURE_SLOT)
     assert (piece.role, piece.piece_type) == (TransferRole.PROMOTION_PIECE, chess.QUEEN)
     assert piece.source.kind is LocationKind.RESERVE_SLOT and piece.target.name == "a8"
-    assert piece.source.xy == PROPOSED_RESERVE_SLOTS[TEST_RESERVE.index(chess.QUEEN)]
+    assert piece.source.xy == RESERVE_SLOTS[TEST_RESERVE.index(chess.QUEEN)]
     assert chain.reserve_slot_used == TEST_RESERVE.index(chess.QUEEN) and chain.capture_slots_used == (0,)
 
 
@@ -228,7 +221,7 @@ def test_captured_pieces_go_to_the_next_free_capture_slot() -> None:
     _, chain = plan(CAPTURE, inventory=ZoneInventory(capture_used=3))
     assert chain.capture_slots_used == (3,)
     assert chain.transfers[0].target.name == "capture_slot[3]"
-    assert chain.transfers[0].target.xy == PROPOSED_CAPTURE_SLOTS[3]
+    assert chain.transfers[0].target.xy == CAPTURE_SLOTS[3]
 
 
 def test_consuming_a_chain_advances_the_inventory() -> None:
@@ -457,24 +450,35 @@ def test_reserve_pieces_must_match_the_reserve_slots() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Grasp profiles ([TO CONFIRM] values: never invented)
+# Grasp profiles (assumed values of settings.yaml: never invented in code)
 # --------------------------------------------------------------------------- #
 
 
-def test_grasp_profiles_round_trip(tmp_path: Path) -> None:
-    path = tmp_path / "grasp_profiles.json"
-    path.write_text(json.dumps(TEST_GRASP))
-    profiles = GraspProfiles.from_file(path)
-    assert profiles.open_deg == 100 and profiles.close_angle(chess.KING) == 46
+def test_grasp_profiles_come_from_settings_and_are_a_placeholder_while_assumed() -> None:
+    from desktop_app.utils.settings import get_settings
+
+    settings = get_settings()
+    profiles = GraspProfiles.from_settings()
+    assert profiles.open_deg == settings.grasp.open_deg
+    assert profiles.close_angle(chess.KING) == settings.grasp.close_deg.K
+    assert settings.assumed_under("grasp"), "the grasp angles are not confirmed on the real gripper yet"
+    assert profiles.is_placeholder
 
 
-def test_a_missing_grasp_file_asks_for_the_owner_values(tmp_path: Path) -> None:
-    with pytest.raises(GraspProfilesError, match="TO CONFIRM"):
-        GraspProfiles.from_file(tmp_path / "missing.json")
+def test_a_confirmed_grasp_is_not_a_placeholder(tmp_path: Path) -> None:
+    import yaml
+
+    from desktop_app.utils.settings import load_settings
+
+    data = yaml.safe_load((REPO_ROOT / "config" / "settings.yaml").read_text(encoding="utf-8"))
+    data["assumed"] = [k for k in data["assumed"] if not k.startswith("grasp.")]
+    path = tmp_path / "settings.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    assert not GraspProfiles.from_settings(load_settings(path, overlay=False)).is_placeholder
 
 
-def test_the_repository_does_not_ship_invented_grasp_values() -> None:
-    assert not (REPO_ROOT / "config" / "grasp_profiles.json").exists(), "gripper angles are [TO CONFIRM]: ask the owner"
+def test_the_repository_has_no_second_source_of_grasp_values() -> None:
+    assert not (REPO_ROOT / "config" / "grasp_profiles.json").exists(), "gripper angles live in config/settings.yaml only"
 
 
 @pytest.mark.parametrize(
@@ -495,13 +499,6 @@ def test_the_repository_does_not_ship_invented_grasp_values() -> None:
 def test_invalid_grasp_profiles_are_rejected(data: object) -> None:
     with pytest.raises(GraspProfilesError):
         GraspProfiles.from_dict(data)
-
-
-def test_a_broken_grasp_file_is_reported(tmp_path: Path) -> None:
-    path = tmp_path / "grasp_profiles.json"
-    path.write_text("{")
-    with pytest.raises(GraspProfilesError):
-        GraspProfiles.from_file(path)
 
 
 # --------------------------------------------------------------------------- #

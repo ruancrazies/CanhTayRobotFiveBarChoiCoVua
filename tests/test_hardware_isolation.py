@@ -2,7 +2,7 @@
 
 * No Qt and no gui imports in hardware/. Only robot_commander.py may touch the core (Event Bus, FSM triggers), and
   the rest of hardware/ is pure Python even transitively (fresh-interpreter ``sys.modules`` check).
-* No hard-coded hardware constant (numeric literals scanned against config/hardware.yaml).
+* No hard-coded hardware constant: tests/test_no_hardcoded_constants.py scans every source for tunable literals.
 * ASCII English only, no print(), full type hints.
 """
 
@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HARDWARE = REPO_ROOT / "desktop_app" / "hardware"
@@ -98,47 +97,3 @@ def test_every_function_has_type_hints(path: Path) -> None:
         and (n.returns is None or any(a.annotation is None for a in n.args.args + n.args.kwonlyargs if a.arg not in ("self", "cls")))
     ]
     assert missing == [], f"functions without full type hints: {missing}"
-
-
-def _hardware_numbers() -> set[float]:
-    data = yaml.safe_load((REPO_ROOT / "config" / "hardware.yaml").read_text(encoding="utf-8"))
-    found: set[float] = set()
-
-    def walk(node: object) -> None:
-        if isinstance(node, dict):
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, (list, tuple)):
-            for value in node:
-                walk(value)
-        elif isinstance(node, (int, float)) and not isinstance(node, bool) and node not in (0, 1, 2):
-            found.add(float(node))
-
-    walk(data)
-    return found | {408.5, 108.5, 191.5, 3200.0}
-
-
-@pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
-def test_no_hardware_constant_is_hard_coded(path: Path) -> None:
-    """Rule 7: dimensions, pins and drive values come from config/hardware.yaml only."""
-    hardware = _hardware_numbers()
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    hits = sorted(
-        {
-            (n.lineno, n.value)
-            for n in ast.walk(tree)
-            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool)
-            and float(n.value) in hardware
-        }
-    )
-    assert hits == [], f"{path.name} hard-codes hardware numbers: {hits}"
-
-
-def test_hardware_yaml_was_not_changed_by_phase_3() -> None:
-    """Phase 3 adds no key and changes no constant in hardware.yaml."""
-    data = yaml.safe_load((REPO_ROOT / "config" / "hardware.yaml").read_text(encoding="utf-8"))
-    assert data["to_confirm"] == []
-    assert data["geometry"]["square_size_mm"] == 31.0 and data["drive"]["gear_ratio"] == 1.0
-    assert data["electrical"]["z_axis"]["timeout_factor"] == 1.5
-    assert data["electrical"]["as5600"]["system_error_deg"] == 1.0
-    assert data["drive"]["microstepping"] == 16

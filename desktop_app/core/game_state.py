@@ -38,15 +38,15 @@ import chess
 import chess.pgn
 
 from desktop_app.core.event_bus import EventBus, Notification
+from desktop_app.utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_GAMES_DIR = REPO_ROOT / "data" / "games"
 
-FEN_FILE = "current.fen"
-PGN_FILE = "current.pgn"
-PENDING_FILE = "pending.json"
+
+def default_games_dir() -> Path:
+    """The saved-game folder (``paths.games_dir`` of config/settings.yaml)."""
+    return get_settings().games_dir
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +270,7 @@ class GameState:
         pending.json removal) or that does not fit is discarded with a warning.
         """
         data_dir = Path(data_dir)
-        fen_path = data_dir / FEN_FILE
+        fen_path = data_dir / get_settings().paths.fen_file
         if not fen_path.exists():
             return None
         try:
@@ -281,7 +281,7 @@ class GameState:
 
         initial_fen = board.fen()
         history: list[MoveRecord] = []
-        replayed = cls._replay_pgn(data_dir / PGN_FILE, board.fen())
+        replayed = cls._replay_pgn(data_dir / get_settings().paths.pgn_file, board.fen())
         if replayed is not None:
             replay_board, initial_fen, history = replayed
             board = replay_board
@@ -436,7 +436,7 @@ class GameState:
                 raise PendingMoveError(f"pending move {self._pending.uci()} must be resolved first")
             if self._data_dir is not None:
                 payload = {"pending_move": move.uci(), "current_fen": self._board.fen()}
-                _atomic_write(self._data_dir / PENDING_FILE, json.dumps(payload, indent=2) + "\n")
+                _atomic_write(self._data_dir / get_settings().paths.pending_file, json.dumps(payload, indent=2) + "\n")
             self._pending = move
 
     def clear_pending_move(self) -> None:
@@ -519,15 +519,15 @@ class GameState:
 
     @property
     def _pending_path(self) -> Optional[Path]:
-        return self._data_dir / PENDING_FILE if self._data_dir is not None else None
+        return self._data_dir / get_settings().paths.pending_file if self._data_dir is not None else None
 
     def _save_position(self, board: chess.Board, history: Sequence[MoveRecord], initial_fen: str) -> None:
         if self._data_dir is None:
             return
         pgn = _build_pgn(initial_fen, history, _outcome_of(board))
         # PGN first, FEN last: current.fen is the commit point that ``load`` trusts.
-        _atomic_write(self._data_dir / PGN_FILE, pgn)
-        _atomic_write(self._data_dir / FEN_FILE, board.fen() + "\n")
+        _atomic_write(self._data_dir / get_settings().paths.pgn_file, pgn)
+        _atomic_write(self._data_dir / get_settings().paths.fen_file, board.fen() + "\n")
 
     def _remove_pending_file(self) -> None:
         path = self._pending_path

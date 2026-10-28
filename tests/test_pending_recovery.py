@@ -15,11 +15,13 @@ import pytest
 
 from desktop_app.console_runner import ConsoleGame, PhysicalWorld, classify_pending
 from desktop_app.core.fsm import Fsm, State, Trigger
-from desktop_app.core.game_state import PENDING_FILE, GameState, MoveSource
+from desktop_app.core.game_state import GameState, MoveSource
+from desktop_app.utils.settings import get_settings
 from desktop_app.core.move_planner import ZoneInventory
 from phase2_support import E2E4, E7E5, Rig, ScriptedEngine, TEST_RESERVE, make_planner
 
 T, S = Trigger, State
+PENDING_FILE = get_settings().paths.pending_file
 UCI = chess.Move.from_uci
 
 

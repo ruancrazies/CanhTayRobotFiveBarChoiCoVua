@@ -10,25 +10,26 @@ import pytest
 
 from desktop_app.kinematics.dimension import BoardGeometry, Workspace
 from desktop_app.kinematics.five_bar import (
-    MIN_SINGULARITY_MARGIN_DEG,
     FiveBarKinematics,
     KinematicsError,
     OutOfReachError,
     SingularityError,
 )
 from desktop_app.kinematics.trajectory import (
-    DEFAULT_MAX_SEGMENT_MM,
     Trajectory,
     TrajectoryError,
     straight_line,
     straight_line_points,
 )
-from desktop_app.utils.hardware_config import load_hardware_config
+from desktop_app.utils.settings import get_settings
+from phase2_support import MIN_SINGULARITY_MARGIN_DEG
+
+DEFAULT_MAX_SEGMENT_MM = get_settings().motion.trajectory_step_mm
 
 
 @pytest.fixture(scope="module")
 def model() -> FiveBarKinematics:
-    return FiveBarKinematics.from_config(load_hardware_config())
+    return FiveBarKinematics.from_config()
 
 
 @pytest.fixture(scope="module")
@@ -38,7 +39,7 @@ def workspace(model: FiveBarKinematics) -> Workspace:
 
 @pytest.fixture(scope="module")
 def squares() -> dict[str, tuple[float, float]]:
-    return BoardGeometry.from_config(load_hardware_config()).all_square_centers()
+    return BoardGeometry.from_config().all_square_centers()
 
 
 def _segment_lengths(points: np.ndarray) -> np.ndarray:
@@ -50,7 +51,7 @@ def _segment_lengths(points: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 
-def test_default_segment_length_is_2_mm() -> None:
+def test_default_segment_length_of_settings_is_2_mm() -> None:
     assert DEFAULT_MAX_SEGMENT_MM == 2.0
 
 
@@ -98,10 +99,16 @@ def test_zero_length_path_is_a_single_point() -> None:
     assert points[0] == pytest.approx((10.0, 300.0))
 
 
-@pytest.mark.parametrize("ds", [0.0, -1.0, math.nan, math.inf, True, "2", None])
+@pytest.mark.parametrize("ds", [0.0, -1.0, math.nan, math.inf, True, "2"])
 def test_invalid_ds_raises(ds: Any) -> None:
     with pytest.raises(KinematicsError):
         straight_line_points((0.0, 300.0), (10.0, 300.0), ds)
+
+
+def test_no_ds_means_the_step_of_settings_yaml() -> None:
+    explicit = straight_line_points((0.0, 300.0), (10.0, 300.0), DEFAULT_MAX_SEGMENT_MM)
+    assert straight_line_points((0.0, 300.0), (10.0, 300.0)) == pytest.approx(explicit)
+    assert straight_line_points((0.0, 300.0), (10.0, 300.0), None) == pytest.approx(explicit)
 
 
 @pytest.mark.parametrize(

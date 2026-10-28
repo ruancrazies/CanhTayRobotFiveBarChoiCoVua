@@ -61,7 +61,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from config.protocol_commands import COMMAND_ORDER, COMMANDS, PROTOCOL_VERSION  # noqa: E402
 from desktop_app.hardware.esp32_simulator import SimConfig, make_loopback_simulator  # noqa: E402
 from desktop_app.hardware.serial_link import ConnectionLost  # noqa: E402
-from desktop_app.utils.hardware_config import load_hardware_config  # noqa: E402
+from desktop_app.utils.settings import load_settings  # noqa: E402
 
 logger = logging.getLogger("wire_compat")
 
@@ -235,11 +235,12 @@ def run_firmware(binary: Path, scripts: Sequence[Sequence[str]]) -> tuple[str, l
 
 
 def run_simulator(scripts: Sequence[Sequence[str]], firmware_version: str) -> list[Transcript]:
-    hardware = load_hardware_config()
+    # The committed settings.yaml only (no local overlay, no environment), like the generated headers.
+    settings = load_settings(overlay=False)
     # Test values for settings the shared subset never uses (nothing moves in these scripts).
-    config = SimConfig.from_hardware(
-        queue_capacity=4, z_travel_s=1.0, heartbeat_timeout_s=2.0, home_joints_s=0.5,
-        initial_joint_deg=(0.0, 0.0), hardware=hardware, firmware_version=firmware_version,
+    config = SimConfig.from_settings(
+        settings, queue_capacity=4, z_travel_s=1.0, heartbeat_timeout_s=2.0, home_joints_s=0.5,
+        initial_joint_deg=(0.0, 0.0), firmware_version=firmware_version,
     )
     transcripts: list[Transcript] = []
     for script in scripts:
@@ -390,7 +391,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--max-length", type=int, default=4)
     parser.add_argument("--firmware-dir", type=Path, default=DEFAULT_FIRMWARE_DIR, help="a firmware/ directory (default: this repository's)")
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.ERROR)  # the hardware config loader warns about [TO CONFIRM] values
+    logging.basicConfig(level=logging.ERROR)  # the settings loader may log about assumed values
 
     try:
         report = run(args.cxx, args.firmware_dir, args.max_length)

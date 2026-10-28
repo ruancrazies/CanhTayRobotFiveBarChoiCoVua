@@ -12,14 +12,14 @@ import pytest
 import yaml
 
 from desktop_app.kinematics.five_bar import (
-    MIN_SINGULARITY_MARGIN_DEG,
     FiveBarKinematics,
     InvalidPoseError,
     KinematicsError,
     OutOfReachError,
     SingularityError,
 )
-from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
+from desktop_app.utils.settings import Settings, load_settings
+from phase2_support import MIN_SINGULARITY_MARGIN_DEG
 
 # SPEC 6.2 test vectors: square -> (x, y, alpha, beta). Tolerance +-0.1 degree.
 SPEC_VECTORS = {
@@ -31,17 +31,17 @@ SPEC_VECTORS = {
 
 
 @pytest.fixture(scope="module")
-def cfg() -> HardwareConfig:
-    return load_hardware_config()
+def cfg() -> Settings:
+    return load_settings(overlay=False)
 
 
 @pytest.fixture(scope="module")
-def model(cfg: HardwareConfig) -> FiveBarKinematics:
+def model(cfg: Settings) -> FiveBarKinematics:
     return FiveBarKinematics.from_config(cfg)
 
 
 @pytest.fixture(scope="module")
-def centers(cfg: HardwareConfig) -> dict[str, tuple[float, float]]:
+def centers(cfg: Settings) -> dict[str, tuple[float, float]]:
     """The 64 square centres, from the config geometry (not from the code under test)."""
     g = cfg.geometry
     x0, y0 = g.first_square_center_xy_mm
@@ -53,7 +53,7 @@ def centers(cfg: HardwareConfig) -> dict[str, tuple[float, float]]:
 
 
 def _write_config(tmp_path: Path, data: dict[str, Any]) -> Path:
-    path = tmp_path / "hardware.yaml"
+    path = tmp_path / "settings.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
 
@@ -67,7 +67,7 @@ def _cross(u: tuple[float, float], v: tuple[float, float]) -> float:
 # --------------------------------------------------------------------------- #
 
 
-def test_model_uses_config_values(model: FiveBarKinematics, cfg: HardwareConfig) -> None:
+def test_model_uses_config_values(model: FiveBarKinematics, cfg: Settings) -> None:
     assert model.l == cfg.geometry.motor_axis_distance_mm
     assert model.m == cfg.geometry.driving_link_mm
     assert model.n == cfg.geometry.driven_link_mm
@@ -80,11 +80,11 @@ def test_from_config_without_argument_loads_default_file(model: FiveBarKinematic
     assert FiveBarKinematics.from_config() == model
 
 
-def test_model_follows_the_config(tmp_path: Path, hardware_yaml_data: dict[str, Any], model: FiveBarKinematics) -> None:
+def test_model_follows_the_config(tmp_path: Path, settings_yaml_data: dict[str, Any], model: FiveBarKinematics) -> None:
     # Change l and i (gear ratio) in a temporary config; the model must follow.
-    hardware_yaml_data["geometry"]["motor_axis_distance_mm"] = 120.0
-    hardware_yaml_data["drive"]["gear_ratio"] = 2.0
-    changed = FiveBarKinematics.from_config(load_hardware_config(_write_config(tmp_path, hardware_yaml_data)))
+    settings_yaml_data["geometry"]["motor_axis_distance_mm"] = 120.0
+    settings_yaml_data["drive"]["gear_ratio"] = 2.0
+    changed = FiveBarKinematics.from_config(load_settings(_write_config(tmp_path, settings_yaml_data), overlay=False))
 
     assert changed.l == 120.0
     assert changed.m == model.m and changed.n == model.n
@@ -409,7 +409,7 @@ def test_ik_accepts_the_exact_reach_limits(model: FiveBarKinematics) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_min_margin_constant_is_15_degrees() -> None:
+def test_min_margin_of_settings_is_15_degrees() -> None:
     assert MIN_SINGULARITY_MARGIN_DEG == 15.0
 
 
@@ -453,7 +453,7 @@ def test_error_hierarchy() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_full_turn_is_3200_steps_when_i_is_1(model: FiveBarKinematics, cfg: HardwareConfig) -> None:
+def test_full_turn_is_3200_steps_when_i_is_1(model: FiveBarKinematics, cfg: Settings) -> None:
     assert cfg.drive.gear_ratio == 1.0
     assert model.angle_to_steps(360.0) == 3200
     assert model.angle_to_steps(-360.0) == -3200

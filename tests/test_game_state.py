@@ -14,9 +14,6 @@ import pytest
 
 from desktop_app.core.event_bus import EventBus
 from desktop_app.core.game_state import (
-    FEN_FILE,
-    PENDING_FILE,
-    PGN_FILE,
     GameOverError,
     GameState,
     GameStateError,
@@ -26,7 +23,12 @@ from desktop_app.core.game_state import (
     PendingMoveError,
     PersistenceError,
 )
+from desktop_app.utils.settings import get_settings
 from phase2_support import E2E4, E7E5, MATE_IN_ONE_FEN
+
+FEN_FILE = get_settings().paths.fen_file
+PENDING_FILE = get_settings().paths.pending_file
+PGN_FILE = get_settings().paths.pgn_file
 
 STALEMATE_FEN = "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1"
 UCI = chess.Move.from_uci

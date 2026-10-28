@@ -11,9 +11,6 @@ import pytest
 import yaml
 
 from desktop_app.kinematics.dimension import (
-    PROPOSED_CAPTURE_SLOTS,
-    PROPOSED_PARK_POSITION,
-    PROPOSED_RESERVE_SLOTS,
     BoardExtent,
     BoardGeometry,
     Workspace,
@@ -22,33 +19,33 @@ from desktop_app.kinematics.dimension import (
     Zones,
 )
 from desktop_app.kinematics.five_bar import (
-    MIN_SINGULARITY_MARGIN_DEG,
     FiveBarKinematics,
     KinematicsError,
     OutOfReachError,
     SingularityError,
 )
-from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
+from desktop_app.utils.settings import Settings, load_settings
+from phase2_support import CAPTURE_SLOTS, MIN_SINGULARITY_MARGIN_DEG, PARK_POSITION, RESERVE_SLOTS
 
-# TEST-ONLY slots for exercising the validation code with small lists. The robot's
-# PROPOSED layout (still [TO CONFIRM]) is tested separately through Zones.proposed.
+# TEST-ONLY slots for exercising the validation code with small lists. The layout of settings.yaml (still assumed)
+# is tested separately through Zones.from_settings.
 TEST_SLOTS_LEFT = ((-200.0, 300.0), (-200.0, 250.0))
 TEST_SLOTS_RIGHT = ((200.0, 300.0), (200.0, 250.0))
 TEST_PARK = (0.0, 100.0)
 
 
 @pytest.fixture(scope="module")
-def cfg() -> HardwareConfig:
-    return load_hardware_config()
+def cfg() -> Settings:
+    return load_settings(overlay=False)
 
 
 @pytest.fixture(scope="module")
-def model(cfg: HardwareConfig) -> FiveBarKinematics:
+def model(cfg: Settings) -> FiveBarKinematics:
     return FiveBarKinematics.from_config(cfg)
 
 
 @pytest.fixture(scope="module")
-def board(cfg: HardwareConfig) -> BoardGeometry:
+def board(cfg: Settings) -> BoardGeometry:
     return BoardGeometry.from_config(cfg)
 
 
@@ -121,13 +118,13 @@ def test_board_extent_is_the_300_mm_board_centred_on_the_y_axis(board: BoardGeom
     assert not board.is_on_board(0.0, 450.1)
 
 
-def test_board_follows_the_config(tmp_path: Path, hardware_yaml_data: dict[str, Any]) -> None:
-    hardware_yaml_data["geometry"]["square_size_mm"] = 30.0
-    hardware_yaml_data["geometry"]["board_border_mm"] = 20.0
-    hardware_yaml_data["geometry"]["motor_to_board_edge_mm"] = 160.0
-    path = tmp_path / "hardware.yaml"
-    path.write_text(yaml.safe_dump(hardware_yaml_data), encoding="utf-8")
-    changed = BoardGeometry.from_config(load_hardware_config(path))
+def test_board_follows_the_config(tmp_path: Path, settings_yaml_data: dict[str, Any]) -> None:
+    settings_yaml_data["geometry"]["square_size_mm"] = 30.0
+    settings_yaml_data["geometry"]["board_border_mm"] = 20.0
+    settings_yaml_data["geometry"]["motor_to_board_edge_mm"] = 160.0
+    path = tmp_path / "settings.yaml"
+    path.write_text(yaml.safe_dump(settings_yaml_data), encoding="utf-8")
+    changed = BoardGeometry.from_config(load_settings(path, overlay=False))
 
     # board = 8 * 30 + 2 * 20 = 280 mm
     assert changed.extent == BoardExtent(-140.0, 140.0, 160.0, 440.0)
@@ -278,52 +275,52 @@ def test_the_flag_changes_nothing_but_the_flag(board: BoardGeometry, workspace: 
         Zones(board, workspace, capture_zone=[(0.0, 300.0)], is_placeholder=False)
 
 
-# ---- the proposed layout (still [TO CONFIRM]) ------------------------------ #
+# ---- the layout of settings.yaml (still assumed) ------------------------------ #
 
 
 def test_proposed_slot_layout_matches_the_owners_proposal() -> None:
-    assert len(PROPOSED_CAPTURE_SLOTS) == 15
-    assert {x for x, _ in PROPOSED_CAPTURE_SLOTS} == {-190.0, -225.0, -260.0}
-    assert {y for _, y in PROPOSED_CAPTURE_SLOTS} == {160.0, 195.0, 230.0, 265.0, 300.0}
-    assert set(PROPOSED_CAPTURE_SLOTS) == {(x, y) for x in (-190.0, -225.0, -260.0) for y in (160.0, 195.0, 230.0, 265.0, 300.0)}
-    assert len(PROPOSED_RESERVE_SLOTS) == 4
-    assert set(PROPOSED_RESERVE_SLOTS) == {(190.0, 200.0), (190.0, 235.0), (225.0, 200.0), (225.0, 235.0)}
-    assert PROPOSED_PARK_POSITION == (0.0, 120.0)
-    assert len(set(PROPOSED_CAPTURE_SLOTS)) == 15 and len(set(PROPOSED_RESERVE_SLOTS)) == 4
+    assert len(CAPTURE_SLOTS) == 15
+    assert {x for x, _ in CAPTURE_SLOTS} == {-190.0, -225.0, -260.0}
+    assert {y for _, y in CAPTURE_SLOTS} == {160.0, 195.0, 230.0, 265.0, 300.0}
+    assert set(CAPTURE_SLOTS) == {(x, y) for x in (-190.0, -225.0, -260.0) for y in (160.0, 195.0, 230.0, 265.0, 300.0)}
+    assert len(RESERVE_SLOTS) == 4
+    assert set(RESERVE_SLOTS) == {(190.0, 200.0), (190.0, 235.0), (225.0, 200.0), (225.0, 235.0)}
+    assert PARK_POSITION == (0.0, 120.0)
+    assert len(set(CAPTURE_SLOTS)) == 15 and len(set(RESERVE_SLOTS)) == 4
 
 
 def test_proposed_fill_order_is_x_major(board: BoardGeometry) -> None:
-    assert PROPOSED_CAPTURE_SLOTS[:5] == tuple((-190.0, y) for y in (160.0, 195.0, 230.0, 265.0, 300.0))
-    assert PROPOSED_CAPTURE_SLOTS[5] == (-225.0, 160.0)
-    assert PROPOSED_RESERVE_SLOTS == ((190.0, 200.0), (190.0, 235.0), (225.0, 200.0), (225.0, 235.0))
+    assert CAPTURE_SLOTS[:5] == tuple((-190.0, y) for y in (160.0, 195.0, 230.0, 265.0, 300.0))
+    assert CAPTURE_SLOTS[5] == (-225.0, 160.0)
+    assert RESERVE_SLOTS == ((190.0, 200.0), (190.0, 235.0), (225.0, 200.0), (225.0, 235.0))
 
 
-def test_proposed_zones_validate_every_slot(
+def test_settings_zones_validate_every_slot(
     board: BoardGeometry, workspace: Workspace, model: FiveBarKinematics, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="desktop_app.kinematics.dimension"):
-        zones = Zones.proposed(board, workspace)
-    assert zones.capture_zone == PROPOSED_CAPTURE_SLOTS
-    assert zones.reserve_zone == PROPOSED_RESERVE_SLOTS
-    assert zones.park_position == PROPOSED_PARK_POSITION
+        zones = Zones.from_settings(board, workspace)
+    assert zones.capture_zone == CAPTURE_SLOTS
+    assert zones.reserve_zone == RESERVE_SLOTS
+    assert zones.park_position == PARK_POSITION
     assert zones.undefined == ()
     # independent re-check of every single slot, against the model, not through Zones
     for slot in (*zones.capture_zone, *zones.reserve_zone, zones.park_position):
         assert not board.is_on_board(*slot), slot
         assert model.is_reachable(*slot), slot
         assert model.margin_at_point(*slot) >= MIN_SINGULARITY_MARGIN_DEG, slot
-    assert any("PROPOSED" in r.getMessage() and "TO CONFIRM" in r.getMessage() for r in caplog.records)
+    assert any("assumed" in r.getMessage() and "settings.yaml" in r.getMessage() for r in caplog.records)
 
 
 def test_the_proposed_layout_is_always_a_placeholder(board: BoardGeometry, workspace: Workspace) -> None:
-    """The owner's proposal is still [TO CONFIRM] on the real board, so it can never read as confirmed."""
-    assert Zones.proposed(board, workspace).is_placeholder
+    """The layout is still assumed (not confirmed on the real board), so it can never read as confirmed."""
+    assert Zones.from_settings(board, workspace).is_placeholder
 
 
 def test_proposed_margins(model: FiveBarKinematics) -> None:
-    margins = {slot: model.margin_at_point(*slot) for slot in (*PROPOSED_CAPTURE_SLOTS, *PROPOSED_RESERVE_SLOTS, PROPOSED_PARK_POSITION)}
-    assert min(margins.values()) == pytest.approx(margins[PROPOSED_PARK_POSITION])
-    assert margins[PROPOSED_PARK_POSITION] == pytest.approx(29.4, abs=0.05)
+    margins = {slot: model.margin_at_point(*slot) for slot in (*CAPTURE_SLOTS, *RESERVE_SLOTS, PARK_POSITION)}
+    assert min(margins.values()) == pytest.approx(margins[PARK_POSITION])
+    assert margins[PARK_POSITION] == pytest.approx(29.4, abs=0.05)
     assert margins[(-260.0, 300.0)] == pytest.approx(33.3, abs=0.05)  # tightest capture slot
 
 
@@ -332,26 +329,26 @@ def test_every_square_can_reach_every_proposed_slot_by_a_straight_line(
 ) -> None:
     from desktop_app.kinematics.trajectory import straight_line
 
-    slots = (*PROPOSED_CAPTURE_SLOTS, *PROPOSED_RESERVE_SLOTS, PROPOSED_PARK_POSITION)
+    slots = (*CAPTURE_SLOTS, *RESERVE_SLOTS, PARK_POSITION)
     for square, center in board.all_square_centers().items():
         for slot in slots:
             for start, end in ((center, slot), (slot, center)):
                 assert straight_line(workspace, start, end).min_margin_deg >= MIN_SINGULARITY_MARGIN_DEG, (square, slot)
 
 
-def test_proposed_zones_follow_a_stricter_workspace(board: BoardGeometry, model: FiveBarKinematics) -> None:
+def test_settings_zones_follow_a_stricter_workspace(board: BoardGeometry, model: FiveBarKinematics) -> None:
     with pytest.raises(ZoneValidationError):  # the park point has mu about 29.4
-        Zones.proposed(board, Workspace(model, min_margin_deg=35.0))
+        Zones.from_settings(board, Workspace(model, min_margin_deg=35.0))
 
 
-def test_proposed_zones_do_not_fit_a_larger_board(model: FiveBarKinematics, tmp_path: Path, hardware_yaml_data: dict[str, Any]) -> None:
-    hardware_yaml_data["geometry"]["square_size_mm"] = 40.0  # board 8 * 40 + 52 = 372, half 186: slot x = -190 is still off
-    hardware_yaml_data["geometry"]["board_border_mm"] = 40.0  # board 400, half 200: x = -190 is now on the board
-    path = tmp_path / "hardware.yaml"
-    path.write_text(yaml.safe_dump(hardware_yaml_data), encoding="utf-8")
-    wide = BoardGeometry.from_config(load_hardware_config(path))
+def test_settings_zones_do_not_fit_a_larger_board(model: FiveBarKinematics, tmp_path: Path, settings_yaml_data: dict[str, Any]) -> None:
+    settings_yaml_data["geometry"]["square_size_mm"] = 40.0  # board 8 * 40 + 52 = 372, half 186: slot x = -190 is still off
+    settings_yaml_data["geometry"]["board_border_mm"] = 40.0  # board 400, half 200: x = -190 is now on the board
+    path = tmp_path / "settings.yaml"
+    path.write_text(yaml.safe_dump(settings_yaml_data), encoding="utf-8")
+    wide = BoardGeometry.from_config(load_settings(path, overlay=False))
     with pytest.raises(ZoneValidationError, match="on the board"):
-        Zones.proposed(wide, Workspace(model))
+        Zones.from_settings(wide, Workspace(model))
 
 
 # ---- validation of every slot ----------------------------------------------- #

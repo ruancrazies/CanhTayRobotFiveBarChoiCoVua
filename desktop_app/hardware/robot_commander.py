@@ -88,11 +88,9 @@ from desktop_app.hardware.serial_link import (
     SerialLink,
     Unsolicited,
 )
+from desktop_app.utils.settings import ConfigError, Settings, get_settings, to_seconds
 
 logger = logging.getLogger(__name__)
-
-_JOIN_TIMEOUT_S = 3.0  # how long stop() waits for a worker thread
-_CLOCK_POLL_S = 0.05  # waits wake this often to re-read the clock, so an injected clock can end them
 
 _PING = CommandName.PING.value
 _WAIT = CommandName.WAIT.value
@@ -178,7 +176,8 @@ class ReplyTimeoutError(CommanderError):
 
 @dataclass(frozen=True)
 class CommanderSettings:
-    """Every value here is a setting, not a constant. The [TO CONFIRM] ones have no default."""
+    """Every value here is a setting, not a constant, and none has a default: :meth:`from_settings` reads the
+    ``commander`` section of config/settings.yaml and refuses while a value there is still null (not decided)."""
 
     move_speed_deg_s: float  # F of every MOVE ([TO CONFIRM])
     ping_interval_s: float  # must be well below the firmware heartbeat threshold ([TO CONFIRM])
@@ -209,6 +208,32 @@ class CommanderSettings:
             raise ValueError("grip_settle_s must be >= 0")
         if self.acceleration is not None and not self.acceleration > 0:
             raise ValueError("acceleration must be > 0 or None")
+
+    @classmethod
+    def from_settings(cls, config: Optional[Settings] = None) -> "CommanderSettings":
+        """The ``commander`` section of settings.yaml, in seconds.
+
+        Raises:
+            ConfigError: a value the Commander needs is still null there (the owner has not decided it yet).
+        """
+        cfg = (config if config is not None else get_settings()).commander
+        if unset := cfg.unset():
+            raise ConfigError(f"the Robot Commander needs a value for {', '.join(unset)} in config/settings.yaml (they are null)")
+        assert cfg.move_speed_deg_s is not None and cfg.ping_interval_ms is not None and cfg.grip_settle_ms is not None
+        assert cfg.start_tolerance_deg is not None and cfg.reply_timeout_ms is not None and cfg.done_timeout_ms is not None
+        assert cfg.send_timeout_ms is not None and cfg.queue_retry_ms is not None and cfg.queue_full_timeout_ms is not None
+        return cls(
+            move_speed_deg_s=cfg.move_speed_deg_s,
+            ping_interval_s=to_seconds(cfg.ping_interval_ms),
+            reply_timeout_s=to_seconds(cfg.reply_timeout_ms),
+            done_timeout_s=to_seconds(cfg.done_timeout_ms),
+            grip_settle_s=to_seconds(cfg.grip_settle_ms),
+            start_tolerance_deg=cfg.start_tolerance_deg,
+            send_timeout_s=to_seconds(cfg.send_timeout_ms),
+            queue_retry_s=to_seconds(cfg.queue_retry_ms),
+            queue_full_timeout_s=to_seconds(cfg.queue_full_timeout_ms),
+            acceleration=cfg.acceleration_deg_s2,
+        )
 
 
 class PlaceholderSource(Protocol):
@@ -352,6 +377,9 @@ class RobotCommander:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._clock = clock  # every deadline and the heartbeat schedule read it; tests inject a manual clock
+        shared = get_settings()
+        self._join_timeout_s = to_seconds(shared.timeouts.thread_join_ms)  # how long stop() waits for the PING thread
+        self._clock_poll_s = to_seconds(shared.commander.clock_poll_ms)  # waits wake this often to re-read the clock
         self._link = link
         self._planner = planner
         self._settings = settings
@@ -415,7 +443,7 @@ class RobotCommander:
         self._ping_stop.set()
         thread = self._ping_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=_JOIN_TIMEOUT_S)
+            thread.join(timeout=self._join_timeout_s)
         self._ping_thread = None
         if self._started:
             self._link.remove_listener(self._on_message)
@@ -731,7 +759,7 @@ class RobotCommander:
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     raise ReplyTimeoutError(f"no {what} within {timeout_s:g} s")
-                self._cond.wait(min(remaining, _CLOCK_POLL_S))
+                self._cond.wait(min(remaining, self._clock_poll_s))
 
     def _wait_ok(self, request: _Request, epoch: int) -> _Request:
         self._wait_for(lambda: request.answered, self._settings.reply_timeout_s, epoch, f"reply to {request.command.name}")
@@ -761,7 +789,7 @@ class RobotCommander:
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     return
-                self._cond.wait(min(remaining, _CLOCK_POLL_S))
+                self._cond.wait(min(remaining, self._clock_poll_s))
             raise alarm
 
     def _best_effort_estop(self) -> None:
@@ -782,7 +810,7 @@ class RobotCommander:
                 next_at = now + self._settings.ping_interval_s  # from when this PING starts: the rate does not drift
                 if self._link.state is LinkState.CONNECTED:
                     self._ping_once()
-            self._ping_stop.wait(min(self._settings.ping_interval_s, _CLOCK_POLL_S))
+            self._ping_stop.wait(min(self._settings.ping_interval_s, self._clock_poll_s))
 
     def _ping_once(self) -> None:
         try:
@@ -796,7 +824,7 @@ class RobotCommander:
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     break
-                self._cond.wait(min(remaining, _CLOCK_POLL_S))
+                self._cond.wait(min(remaining, self._clock_poll_s))
             alive = request.answered  # even error:N proves the ESP32 is listening
         self._forget(request)
         if alive:

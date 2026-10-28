@@ -1,7 +1,7 @@
 """Shared rig for the phase 3 tests: the whole stack, FSM to Move Planner to Commander to simulator.
 
-Every timing and speed below is a TEST VALUE: the real ones are [TO CONFIRM] and measured on the
-hardware in phases 4 and 5. Nothing here needs a serial port.
+Every timing and speed below is a TEST VALUE: the real ones are null or assumed in config/settings.yaml
+and measured on the hardware in phases 4 and 5. Nothing here needs a serial port.
 """
 
 from __future__ import annotations
@@ -21,10 +21,9 @@ from desktop_app.core.move_planner import MoveChain, MovePlanner, ZoneInventory
 from desktop_app.hardware.esp32_simulator import Esp32Simulator, TraceEvent, make_loopback_simulator
 from desktop_app.hardware.robot_commander import CommanderError, CommanderSettings, RobotCommander
 from desktop_app.hardware.serial_link import LinkSettings, LoopbackPair, LoopbackTransport, SerialLink, Transport
-from desktop_app.kinematics.dimension import PROPOSED_PARK_POSITION
 from desktop_app.kinematics.five_bar import FiveBarKinematics
-from desktop_app.utils.hardware_config import load_hardware_config
-from phase2_support import Rig, make_geometry, make_planner, make_workspace, make_zones
+from desktop_app.utils.settings import get_settings
+from phase2_support import PARK_POSITION, Rig, make_geometry, make_planner, make_zones
 from sim_support import fast_sim_config
 
 # (FEN before the human move, human move, engine move). The human is white, the engine (the robot) black.
@@ -43,19 +42,18 @@ REPLAY_TOLERANCE_MM = 0.05
 
 
 def park_joints() -> tuple[float, float]:
-    alpha, beta = FiveBarKinematics.from_config().ik(*PROPOSED_PARK_POSITION)
+    alpha, beta = FiveBarKinematics.from_config().ik(*PARK_POSITION)
     return float(alpha), float(beta)
 
 
 def commander_settings(**overrides: Any) -> CommanderSettings:
-    hardware = load_hardware_config()
     values: dict[str, Any] = dict(
         move_speed_deg_s=2000.0,
         ping_interval_s=0.02,
         reply_timeout_s=2.0,
         done_timeout_s=2.0,
         grip_settle_s=0.0,
-        start_tolerance_deg=hardware.electrical.as5600.system_error_deg,
+        start_tolerance_deg=get_settings().electrical.as5600.system_error_deg,
         send_timeout_s=2.0,
         queue_retry_s=0.002,
         queue_full_timeout_s=3.0,

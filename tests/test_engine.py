@@ -7,7 +7,6 @@ when the binary cannot be found.
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ from typing import Any
 import chess
 import chess.engine
 import pytest
+import yaml
 
 from desktop_app.core.engine import (
     MODE_KEYS,
@@ -33,7 +33,7 @@ from phase2_support import E2E4, FakeBackends, engine_config
 from stockfish_support import REAL_STOCKFISH_PATH, REAL_STOCKFISH_SKIP_REASON
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = REPO_ROOT / "config" / "difficulty_levels.json"
+CONFIG_PATH = REPO_ROOT / "config" / "settings.yaml"
 AFTER_E4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
 
@@ -43,17 +43,17 @@ def make_engine(script: list[object] | None = None, mode: str | None = None, bus
 
 
 def config_data() -> dict[str, Any]:
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
 
 
 def write_config(tmp_path: Path, data: dict[str, Any]) -> Path:
-    path = tmp_path / "difficulty_levels.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
+    path = tmp_path / "settings.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
 
 
 # --------------------------------------------------------------------------- #
-# config/difficulty_levels.json
+# The engine and modes sections of config/settings.yaml
 # --------------------------------------------------------------------------- #
 
 
@@ -74,7 +74,7 @@ def test_modes_match_the_spec_table() -> None:
     assert modes["grandmaster"].think_time_s == 3.0
 
 
-def test_config_file_is_ascii_english_only() -> None:
+def test_settings_file_is_ascii_english_only() -> None:
     assert re.fullmatch(r"[\x00-\x7f]*", CONFIG_PATH.read_text(encoding="utf-8")), "no Vietnamese outside strings_vi.py"
 
 
@@ -85,16 +85,16 @@ def test_engine_path_comes_from_the_config() -> None:
 @pytest.mark.parametrize(
     "mutate, message",
     [
-        (lambda d: d["modes"].pop("master"), "modes must be exactly"),
-        (lambda d: d["modes"].update(extra={}), "modes must be exactly"),
-        (lambda d: d["modes"]["beginner"].update(think_time_s=0), "think_time_s"),
-        (lambda d: d["modes"]["beginner"].update(think_time_s=True), "think_time_s"),
-        (lambda d: d["modes"]["beginner"].update(max_depth=True), "max_depth"),
-        (lambda d: d["modes"]["beginner"].update(max_depth=0), "max_depth"),
-        (lambda d: d["modes"]["beginner"].update(options={"Skill Level": 1.5}), "options"),
-        (lambda d: d.update(default_mode="expert"), "default_mode"),
+        (lambda d: d["engine"]["modes"].pop("master"), "missing key"),
+        (lambda d: d["engine"]["modes"].update(extra={}), "unknown key"),
+        (lambda d: d["engine"]["modes"]["beginner"].update(think_time_ms=0), "think_time_ms"),
+        (lambda d: d["engine"]["modes"]["beginner"].update(think_time_ms=True), "think_time_ms"),
+        (lambda d: d["engine"]["modes"]["beginner"].update(max_depth=True), "max_depth"),
+        (lambda d: d["engine"]["modes"]["beginner"].update(max_depth=0), "max_depth"),
+        (lambda d: d["engine"]["modes"]["beginner"].update(options={"Skill Level": 1.5}), "options"),
+        (lambda d: d["engine"].update(default_mode="expert"), "default_mode"),
         (lambda d: d["engine"].update(path=""), "engine.path"),
-        (lambda d: d["engine"].update(answer_margin_s=-1), "answer_margin_s"),
+        (lambda d: d["engine"].update(answer_margin_ms=-1), "answer_margin_ms"),
         (lambda d: d["engine"].update(max_restarts=-1), "max_restarts"),
         (lambda d: d.pop("engine"), "missing key"),
     ],
@@ -108,9 +108,9 @@ def test_invalid_config_is_rejected(tmp_path: Path, mutate: Any, message: str) -
 
 def test_missing_or_broken_config_file(tmp_path: Path) -> None:
     with pytest.raises(EngineConfigError):
-        load_engine_config(tmp_path / "nope.json")
-    broken = tmp_path / "broken.json"
-    broken.write_text("{")
+        load_engine_config(tmp_path / "nope.yaml")
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("engine: [")
     with pytest.raises(EngineConfigError):
         load_engine_config(broken)
 

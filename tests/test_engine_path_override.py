@@ -1,4 +1,4 @@
-"""Stockfish path override: STOCKFISH_PATH, then config/local.json, then difficulty_levels.json.
+"""Stockfish path override: STOCKFISH_PATH, then config/local.yaml, then config/settings.yaml.
 
 Nothing here needs the Stockfish binary. Every test passes its own ``environ`` and
 ``local_config_path`` unless it is specifically about the default wiring.
@@ -6,7 +6,6 @@ Nothing here needs the Stockfish binary. Every test passes its own ``environ`` a
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -15,30 +14,24 @@ from typing import Any, Mapping, Optional
 
 import chess
 import pytest
+import yaml
 
 from desktop_app.core import engine as engine_module
-from desktop_app.core.engine import (
-    DEFAULT_CONFIG_PATH,
-    LOCAL_CONFIG_KEYS,
-    STOCKFISH_PATH_ENV,
-    Engine,
-    EngineConfigError,
-    PathSource,
-    load_engine_config,
-    resolve_engine_path,
-)
+from desktop_app.core.engine import Engine, EngineConfigError, load_engine_config
+from desktop_app.utils import settings as settings_module
+from desktop_app.utils.settings import DEFAULT_SETTINGS_PATH, STOCKFISH_PATH_ENV, PathSource
 from phase2_support import FakeBackend, FakeBackends
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FILE_PATH = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))["engine"]["path"]
+FILE_PATH = yaml.safe_load(DEFAULT_SETTINGS_PATH.read_text(encoding="utf-8"))["engine"]["path"]
 
 ENV_PATH = "/from/env/stockfish"
 LOCAL_PATH = "/from/local/stockfish"
 
 
 def write_local(tmp_path: Path, content: Any) -> Path:
-    path = tmp_path / "local.json"
-    path.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+    path = tmp_path / "local.yaml"
+    path.write_text(content if isinstance(content, str) else yaml.safe_dump(content), encoding="utf-8")
     return path
 
 
@@ -47,7 +40,7 @@ def load(environ: Mapping[str, str], local: Optional[Path]) -> Any:
 
 
 # --------------------------------------------------------------------------- #
-# Precedence: environment > local file > difficulty_levels.json
+# Precedence: environment > local file > settings.yaml
 # --------------------------------------------------------------------------- #
 
 
@@ -57,24 +50,24 @@ def load(environ: Mapping[str, str], local: Optional[Path]) -> Any:
         pytest.param(ENV_PATH, LOCAL_PATH, ENV_PATH, PathSource.ENVIRONMENT, id="env beats local and file"),
         pytest.param(ENV_PATH, None, ENV_PATH, PathSource.ENVIRONMENT, id="env beats file"),
         pytest.param(None, LOCAL_PATH, LOCAL_PATH, PathSource.LOCAL_FILE, id="local beats file"),
-        pytest.param(None, None, FILE_PATH, PathSource.DIFFICULTY_FILE, id="file when nothing overrides"),
+        pytest.param(None, None, FILE_PATH, PathSource.SETTINGS_FILE, id="file when nothing overrides"),
         pytest.param("", LOCAL_PATH, LOCAL_PATH, PathSource.LOCAL_FILE, id="blank env is unset, local wins"),
-        pytest.param("   ", None, FILE_PATH, PathSource.DIFFICULTY_FILE, id="whitespace env is unset, file wins"),
+        pytest.param("   ", None, FILE_PATH, PathSource.SETTINGS_FILE, id="whitespace env is unset, file wins"),
     ],
 )
 def test_precedence(
     tmp_path: Path, env: Optional[str], local: Optional[str], expected_path: str, expected_source: PathSource
 ) -> None:
     environ = {STOCKFISH_PATH_ENV: env} if env is not None else {}
-    local_file = write_local(tmp_path, {"stockfish_path": local}) if local is not None else tmp_path / "absent.json"
+    local_file = write_local(tmp_path, {"engine": {"path": local}}) if local is not None else tmp_path / "absent.yaml"
     config = load(environ, local_file)
     assert config.path == expected_path
     assert config.path_source is expected_source
 
 
 def test_the_override_replaces_only_the_path_never_the_modes() -> None:
-    plain = load_engine_config(environ={}, local_config_path=Path("absent.json"))
-    overridden = load_engine_config(environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=Path("absent.json"))
+    plain = load_engine_config(environ={}, local_config_path=Path("absent.yaml"))
+    overridden = load_engine_config(environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=Path("absent.yaml"))
     assert overridden.path == ENV_PATH and plain.path == FILE_PATH
     assert overridden.modes == plain.modes
     assert (overridden.default_mode, overridden.answer_margin_s, overridden.max_restarts) == (
@@ -86,24 +79,17 @@ def test_the_override_replaces_only_the_path_never_the_modes() -> None:
 
 def test_values_are_stripped(tmp_path: Path) -> None:
     assert load({STOCKFISH_PATH_ENV: f"  {ENV_PATH}\n"}, None).path == ENV_PATH
-    assert load({}, write_local(tmp_path, {"stockfish_path": f" {LOCAL_PATH} "})).path == LOCAL_PATH
+    assert load({}, write_local(tmp_path, {"engine": {"path": f" {LOCAL_PATH} "}})).path == LOCAL_PATH
 
 
-def test_the_override_applies_to_any_difficulty_file(tmp_path: Path) -> None:
-    data = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+def test_the_override_applies_to_any_settings_file(tmp_path: Path) -> None:
+    data = yaml.safe_load(DEFAULT_SETTINGS_PATH.read_text(encoding="utf-8"))
     data["engine"]["path"] = "some-other-engine"
-    alternative = tmp_path / "alt.json"
-    alternative.write_text(json.dumps(data), encoding="utf-8")
+    alternative = tmp_path / "alt.yaml"
+    alternative.write_text(yaml.safe_dump(data), encoding="utf-8")
 
-    assert load_engine_config(alternative, environ={}, local_config_path=tmp_path / "absent.json").path == "some-other-engine"
-    assert load_engine_config(alternative, environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=tmp_path / "absent.json").path == ENV_PATH
-
-
-def test_resolve_engine_path_returns_the_default_when_nothing_overrides(tmp_path: Path) -> None:
-    assert resolve_engine_path("stockfish", environ={}, local_config_path=tmp_path / "absent.json") == (
-        "stockfish",
-        PathSource.DIFFICULTY_FILE,
-    )
+    assert load_engine_config(alternative, environ={}, local_config_path=tmp_path / "absent.yaml").path == "some-other-engine"
+    assert load_engine_config(alternative, environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=tmp_path / "absent.yaml").path == ENV_PATH
 
 
 # --------------------------------------------------------------------------- #
@@ -112,26 +98,26 @@ def test_resolve_engine_path_returns_the_default_when_nothing_overrides(tmp_path
 
 
 def test_a_missing_local_file_overrides_nothing(tmp_path: Path) -> None:
-    assert load({}, tmp_path / "absent.json").path_source is PathSource.DIFFICULTY_FILE
+    assert load({}, tmp_path / "absent.yaml").path_source is PathSource.SETTINGS_FILE
 
 
-def test_an_empty_local_object_overrides_nothing(tmp_path: Path) -> None:
-    assert load({}, write_local(tmp_path, {})).path_source is PathSource.DIFFICULTY_FILE
+def test_an_empty_local_file_or_object_overrides_nothing(tmp_path: Path) -> None:
+    assert load({}, write_local(tmp_path, {})).path_source is PathSource.SETTINGS_FILE
+    assert load({}, write_local(tmp_path, "")).path_source is PathSource.SETTINGS_FILE
 
 
 @pytest.mark.parametrize(
     ("content", "message"),
     [
-        pytest.param("{", "not valid JSON", id="broken json"),
-        pytest.param("", "not valid JSON", id="empty file"),
-        pytest.param([1, 2], "top level must be an object", id="list"),
-        pytest.param("null", "top level must be an object", id="null"),
-        pytest.param({"stockfish_pth": "typo"}, "unknown key", id="typo in the key"),
-        pytest.param({"stockfish_path": LOCAL_PATH, "camera": "x"}, "unknown key", id="extra key"),
-        pytest.param({"stockfish_path": 5}, "non-empty string", id="number"),
-        pytest.param({"stockfish_path": None}, "non-empty string", id="null value"),
-        pytest.param({"stockfish_path": ""}, "non-empty string", id="empty string"),
-        pytest.param({"stockfish_path": "   "}, "non-empty string", id="blank string"),
+        pytest.param("engine: [", "not valid YAML", id="broken yaml"),
+        pytest.param([1, 2], "expected a mapping", id="list"),
+        pytest.param({"engine": {"pth": "typo"}}, "unknown key", id="typo in the key"),
+        pytest.param({"engine": {"path": LOCAL_PATH}, "camera": "x"}, "unknown key", id="extra key"),
+        pytest.param({"engine": {"path": 5}}, "engine.path", id="number"),
+        pytest.param({"engine": {"path": None}}, "engine.path", id="null value"),
+        pytest.param({"engine": {"path": ""}}, "engine.path", id="empty string"),
+        pytest.param({"engine": {"path": "   "}}, "engine.path", id="blank string"),
+        pytest.param({"assumed": []}, "assumed", id="the assumed list is not overridable"),
     ],
 )
 def test_a_broken_local_file_is_an_error_not_a_silent_fallback(tmp_path: Path, content: Any, message: str) -> None:
@@ -144,25 +130,27 @@ def test_an_unreadable_local_path_is_an_error(tmp_path: Path) -> None:
         load({}, tmp_path)  # a directory
 
 
-def test_the_environment_decides_without_reading_the_local_file(tmp_path: Path) -> None:
-    """The local file is consulted only when the environment variable does not decide."""
-    broken = write_local(tmp_path, "{")
-    assert load({STOCKFISH_PATH_ENV: ENV_PATH}, broken).path == ENV_PATH
-    with pytest.raises(EngineConfigError):
-        load({}, broken)
+def test_a_broken_local_file_is_an_error_even_when_the_environment_decides_the_path(tmp_path: Path) -> None:
+    """Unlike the old local.json (which held only the Stockfish path), local.yaml carries other keys (the serial port),
+    so it is always read and validated; STOCKFISH_PATH only wins over the engine.path inside it."""
+    broken = write_local(tmp_path, "engine: [")
+    with pytest.raises(EngineConfigError, match="not valid YAML"):
+        load({STOCKFISH_PATH_ENV: ENV_PATH}, broken)
+    valid = write_local(tmp_path, {"engine": {"path": LOCAL_PATH}, "serial": {"port": "/dev/ttyUSB7"}})
+    assert load({STOCKFISH_PATH_ENV: ENV_PATH}, valid).path == ENV_PATH
 
 
-def test_the_difficulty_file_is_still_validated_when_it_is_overridden(tmp_path: Path) -> None:
-    data = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+def test_the_settings_file_is_still_validated_when_it_is_overridden(tmp_path: Path) -> None:
+    data = yaml.safe_load(DEFAULT_SETTINGS_PATH.read_text(encoding="utf-8"))
     data["engine"]["path"] = ""
-    bad = tmp_path / "bad.json"
-    bad.write_text(json.dumps(data), encoding="utf-8")
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(EngineConfigError, match="engine.path"):
-        load_engine_config(bad, environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=tmp_path / "absent.json")
+        load_engine_config(bad, environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=tmp_path / "absent.yaml")
 
 
 # --------------------------------------------------------------------------- #
-# Default wiring: the real environment and the repository's config/local.json
+# Default wiring: the real environment and the repository's config/local.yaml
 # --------------------------------------------------------------------------- #
 
 
@@ -173,7 +161,7 @@ def test_the_default_call_reads_the_process_environment(monkeypatch: pytest.Monk
 
 
 def test_the_default_call_reads_the_default_local_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(engine_module, "DEFAULT_LOCAL_CONFIG_PATH", write_local(tmp_path, {"stockfish_path": LOCAL_PATH}))
+    monkeypatch.setattr(settings_module, "DEFAULT_LOCAL_PATH", write_local(tmp_path, {"engine": {"path": LOCAL_PATH}}))
     config = load_engine_config()
     assert (config.path, config.path_source) == (LOCAL_PATH, PathSource.LOCAL_FILE)
 
@@ -183,23 +171,23 @@ def test_the_default_local_file_lives_next_to_the_other_config_files() -> None:
     code = (
         "import sys\n"
         "sys.path.insert(0, sys.argv[1])\n"
-        "from desktop_app.core import engine\n"
-        "print(engine.DEFAULT_LOCAL_CONFIG_PATH)\n"
-        "print(engine.STOCKFISH_PATH_ENV)\n"
+        "from desktop_app.utils import settings\n"
+        "print(settings.DEFAULT_LOCAL_PATH)\n"
+        "print(settings.STOCKFISH_PATH_ENV)\n"
     )
     result = subprocess.run(
         [sys.executable, "-I", "-c", code, str(REPO_ROOT)], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
     local_path, env_name = result.stdout.split()
-    assert Path(local_path) == REPO_ROOT / "config" / "local.json"
+    assert Path(local_path) == REPO_ROOT / "config" / "local.yaml"
     assert env_name == "STOCKFISH_PATH"
 
 
 def test_the_test_suite_is_isolated_from_the_developers_machine() -> None:
     assert STOCKFISH_PATH_ENV not in os.environ
-    assert not engine_module.DEFAULT_LOCAL_CONFIG_PATH.exists()
-    assert load_engine_config().path_source is PathSource.DIFFICULTY_FILE
+    assert not settings_module.DEFAULT_LOCAL_PATH.exists()
+    assert load_engine_config().path_source is PathSource.SETTINGS_FILE
 
 
 # --------------------------------------------------------------------------- #
@@ -220,7 +208,7 @@ class RecordingBackend(FakeBackend):
 def test_the_engine_starts_the_overridden_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     RecordingBackend.launched = []
     monkeypatch.setattr(engine_module, "StockfishBackend", RecordingBackend)
-    config = load_engine_config(environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=Path("absent.json"))
+    config = load_engine_config(environ={STOCKFISH_PATH_ENV: ENV_PATH}, local_config_path=Path("absent.yaml"))
     with Engine(config) as engine:
         engine.best_move(chess.STARTING_FEN)
     assert RecordingBackend.launched == [ENV_PATH]
@@ -231,19 +219,20 @@ def test_the_engine_starts_the_overridden_binary(monkeypatch: pytest.MonkeyPatch
 # --------------------------------------------------------------------------- #
 
 
-def test_local_json_is_git_ignored() -> None:
+def test_local_yaml_is_git_ignored() -> None:
     lines = [line.strip() for line in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()]
-    assert "config/local.json" in lines
+    assert "config/local.yaml" in lines
 
 
-def test_the_repository_documents_local_json_with_an_example_file() -> None:
-    # A developer may well have their own (git-ignored) config/local.json, so only the example is checked.
-    example = REPO_ROOT / "config" / "local.example.json"
-    text = example.read_text(encoding="utf-8")
-    assert text.isascii()
-    data = json.loads(text)
-    assert set(data) <= LOCAL_CONFIG_KEYS
-    assert isinstance(data["stockfish_path"], str) and data["stockfish_path"].strip()
+def test_the_repository_documents_local_yaml_with_an_example_file() -> None:
+    """A developer may well have their own (git-ignored) config/local.yaml, so only the example is checked.
+
+    The example must itself be a valid overlay: same keys as settings.yaml, correct types."""
+    example = REPO_ROOT / "config" / "local.example.yaml"
+    assert example.read_text(encoding="utf-8").isascii()
+    settings = settings_module.load_settings(local_path=example, environ={})
+    assert settings.engine.path and settings.serial.port
+    assert settings.path_source is PathSource.LOCAL_FILE
 
 
 # --------------------------------------------------------------------------- #
@@ -263,14 +252,14 @@ def test_locate_stockfish_follows_the_application_precedence(tmp_path: Path) -> 
     from stockfish_support import locate_stockfish
 
     binary = _fake_binary(tmp_path)
-    absent = tmp_path / "absent.json"
+    absent = tmp_path / "absent.yaml"
     assert locate_stockfish({STOCKFISH_PATH_ENV: str(binary)}, absent) == (str(binary), "")
-    local = write_local(tmp_path, {"stockfish_path": str(binary)})
+    local = write_local(tmp_path, {"engine": {"path": str(binary)}})
     assert locate_stockfish({}, local) == (str(binary), "")
     # the environment wins over the local file: a missing env binary is NOT rescued by the local file
     path, reason = locate_stockfish({STOCKFISH_PATH_ENV: str(tmp_path / "gone")}, local)
     assert path is None and "gone" in reason and PathSource.ENVIRONMENT.value in reason
-    path, reason = locate_stockfish({}, write_local(tmp_path, "[not an object]"))
+    path, reason = locate_stockfish({}, write_local(tmp_path, "[not a mapping]"))
     assert path is None and "invalid" in reason
 
 

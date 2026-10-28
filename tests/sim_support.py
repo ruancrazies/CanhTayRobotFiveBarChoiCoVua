@@ -37,7 +37,7 @@ def sim_config(**overrides: Any) -> SimConfig:
         initial_joint_deg=START_JOINTS,
     )
     values.update(overrides)
-    return SimConfig.from_hardware(**values)
+    return SimConfig.from_settings(**values)
 
 
 def fast_sim_config(**overrides: Any) -> SimConfig:

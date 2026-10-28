@@ -12,7 +12,7 @@ import pytest
 from config.protocol_commands import COMMAND_ORDER, COMMANDS, PROTOCOL_VERSION, AlarmCode, ErrorCode
 from desktop_app.hardware.esp32_simulator import Esp32Simulator, SimConfig
 from desktop_app.hardware.serial_link import ConnectionLost
-from desktop_app.utils.hardware_config import load_hardware_config
+from desktop_app.utils.settings import ConfigError, get_settings, to_seconds
 from sim_support import START_JOINTS, Bench, fast_sim_config, sim_config, threaded_simulator, wait_for
 
 MOVE_10 = "MOVE A=160 B=40 F=20"  # 10 degrees on each joint at 20 deg/s = 0.5 s
@@ -23,20 +23,31 @@ MOVE_10 = "MOVE A=160 B=40 F=20"  # 10 degrees on each joint at 20 deg/s = 0.5 s
 # --------------------------------------------------------------------------- #
 
 
-def test_config_takes_derived_values_from_hardware_yaml() -> None:
-    hardware = load_hardware_config()
+def test_config_takes_derived_values_from_settings_yaml() -> None:
+    settings = get_settings()
     config = sim_config()
-    assert config.pulses_per_rev == hardware.drive.pulses_per_rev
-    assert config.z_timeout_factor == hardware.electrical.z_axis.timeout_factor
+    assert config.pulses_per_rev == settings.drive.pulses_per_rev
+    assert config.z_timeout_factor == settings.electrical.z_axis.timeout_factor
     assert config.z_timeout_s == pytest.approx(config.z_timeout_factor * config.z_travel_s)
 
 
-def test_nothing_that_is_to_confirm_has_a_default() -> None:
-    for missing in ("queue_capacity", "z_travel_s", "heartbeat_timeout_s", "home_joints_s", "initial_joint_deg"):
-        kwargs = dict(queue_capacity=2, z_travel_s=1.0, heartbeat_timeout_s=1.0, home_joints_s=0.1, initial_joint_deg=(0.0, 0.0))
+def test_unset_values_come_from_settings_yaml_and_null_ones_are_refused() -> None:
+    settings = get_settings()
+    # Values that settings.yaml holds are used when the caller gives none.
+    partial = SimConfig.from_settings(z_travel_s=1.0, home_joints_s=0.1, initial_joint_deg=(0.0, 0.0))
+    assert partial.queue_capacity == settings.serial.queue_depth
+    assert partial.heartbeat_timeout_s == to_seconds(settings.timeouts.heartbeat_timeout_ms)
+    # Values that are null there (not decided yet) have no default: asking for them is an error.
+    for missing in ("z_travel_s", "home_joints_s", "initial_joint_deg"):
+        kwargs = dict(z_travel_s=1.0, home_joints_s=0.1, initial_joint_deg=(0.0, 0.0))
         del kwargs[missing]
-        with pytest.raises(TypeError):
-            SimConfig.from_hardware(**kwargs)
+        with pytest.raises(ConfigError, match="settings.yaml"):
+            SimConfig.from_settings(**kwargs)
+
+
+def test_the_simulator_config_has_no_defaults_of_its_own() -> None:
+    with pytest.raises(TypeError):
+        SimConfig()  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize(

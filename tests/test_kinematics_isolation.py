@@ -3,7 +3,7 @@
 * No Qt, no serial, and no imports from gui/, hardware/, core/ or vision/ (static AST scan
   plus a fresh-interpreter import that inspects sys.modules).
 * No hard-coded hardware constant: numeric literals in the modules are scanned against the
-  values in config/hardware.yaml.
+  values in config/settings.yaml.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def test_the_checker_flags_what_it_should() -> None:
                "from ..core.fsm import Machine"]
     for snippet in flagged:
         assert any(_is_forbidden(n) for n in _imported_modules(snippet, package)), snippet
-    for snippet in ["import math", "import numpy as np", "from desktop_app.utils.hardware_config import load_hardware_config",
+    for snippet in ["import math", "import numpy as np", "from desktop_app.utils.settings import load_settings",
                     "from desktop_app.kinematics.five_bar import FiveBarKinematics", "from . import five_bar"]:
         assert not any(_is_forbidden(n) for n in _imported_modules(snippet, package)), snippet
 
@@ -101,16 +101,6 @@ def test_no_hardware_constant_is_hard_coded(module: Path) -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
     ]
-    # The owner's PROPOSED zone layout is [TO CONFIRM] data, not a hardware.yaml constant:
-    # exactly the assignments named PROPOSED_* are exempt, nothing else.
-    exempt = {
-        child.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id.startswith("PROPOSED_")
-        for child in ast.walk(node)
-        if hasattr(child, "lineno")
-    }
-    literals = [(line, value) for line, value in literals if line not in exempt]
     offending = [(line, value) for line, value in literals if value in HARDWARE_NUMBERS]
     assert offending == [], f"{module.name} hard-codes hardware numbers: {offending}"
 
@@ -121,12 +111,7 @@ def test_the_literal_scan_would_catch_a_hard_coded_constant() -> None:
     assert found == [100.0, 200, 3200]
 
 
-def test_only_the_proposed_zone_layout_is_exempt_from_the_literal_scan() -> None:
+def test_no_zone_layout_is_left_in_the_code() -> None:
+    """The capture/reserve/park layout lives in settings.yaml only: nothing in the kinematics package is exempt from the scan."""
     dimension = (KINEMATICS_DIR / "dimension.py").read_text(encoding="utf-8")
-    tree = ast.parse(dimension)
-    exempt_names = [
-        node.target.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id.startswith("PROPOSED_")
-    ]
-    assert exempt_names == ["PROPOSED_CAPTURE_SLOTS", "PROPOSED_RESERVE_SLOTS", "PROPOSED_PARK_POSITION"]
+    assert "PROPOSED_" not in dimension and "_grid" not in dimension

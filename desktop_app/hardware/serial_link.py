@@ -20,7 +20,9 @@ It NEVER resends a command after a reconnect: a MOVE may have been half-applied,
 have stopped on its heartbeat timeout and need homing. What a lost link means for the game is
 decided by the Robot Commander, not here.
 
-No Qt, no hardware constant. The baud rate is [TO CONFIRM] (SPEC 5) and therefore has no default.
+No Qt, no hardware constant. Every tunable value (join timeout, in-flight limit, poll interval, line length, reconnect
+policy, preview size) comes from config/settings.yaml through :class:`LinkSettings` / the typed loader. The baud rate
+is assumed (SPEC 5) and has no default in :class:`PySerialTransport`.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Deque, Optional, Union
 
@@ -48,12 +50,11 @@ from desktop_app.hardware.protocol import (
     frame,
     parse_response,
 )
+from desktop_app.utils.settings import Settings, get_settings, to_seconds
 
 logger = logging.getLogger(__name__)
 
-_JOIN_TIMEOUT_S = 3.0  # how long stop() waits for a worker thread
 _NEWLINE = b"\n"[0]  # the byte that ends a line
-_RAW_PREVIEW_BYTES = 24  # how much of an over-long line is kept for the log
 
 
 # --------------------------------------------------------------------------- #
@@ -361,10 +362,11 @@ class Frame:
 class LineFramer:
     """Splits a byte stream into lines. Empty lines are dropped; ``\\r\\n`` and ``\\n`` both end a line."""
 
-    def __init__(self, max_line_bytes: int) -> None:
+    def __init__(self, max_line_bytes: int, preview_bytes: Optional[int] = None) -> None:
         if max_line_bytes < 1:
             raise ValueError("max_line_bytes must be >= 1")
         self._max = max_line_bytes
+        self._preview = preview_bytes if preview_bytes is not None else get_settings().link.raw_preview_bytes
         self._buffer = bytearray()
         self._discarding = False
 
@@ -388,7 +390,7 @@ class LineFramer:
             else:
                 self._buffer.append(byte)
                 if len(self._buffer) > self._max:
-                    frames.append(Frame(error=f"line longer than {self._max} bytes", raw=bytes(self._buffer[:_RAW_PREVIEW_BYTES])))
+                    frames.append(Frame(error=f"line longer than {self._max} bytes", raw=bytes(self._buffer[: self._preview])))
                     self._buffer.clear()
                     self._discarding = True
         return frames
@@ -469,6 +471,14 @@ class ReconnectPolicy:
     interval_s: float
     max_attempts: Optional[int] = None
 
+    @classmethod
+    def from_settings(cls, config: Optional[Settings] = None) -> Optional["ReconnectPolicy"]:
+        """The ``link.reconnect_*`` keys of settings.yaml; None (no reconnecting) while the interval is null."""
+        link = (config if config is not None else get_settings()).link
+        if link.reconnect_interval_ms is None:
+            return None
+        return cls(interval_s=to_seconds(link.reconnect_interval_ms), max_attempts=link.reconnect_max_attempts)
+
     def __post_init__(self) -> None:
         if not self.interval_s > 0:
             raise ValueError("interval_s must be > 0")
@@ -478,11 +488,12 @@ class ReconnectPolicy:
 
 @dataclass(frozen=True)
 class LinkSettings:
-    """Software settings of the link (none of them is a hardware value)."""
+    """Software settings of the link (none of them is a hardware value). They have no defaults of their own:
+    :meth:`from_settings` reads the ``link`` and ``serial`` sections of config/settings.yaml."""
 
-    max_in_flight: int = 3  # SPEC 5.3: "only a few"; must not exceed the firmware motion queue depth
-    read_poll_s: float = 0.05  # how often the reader thread looks at the stop flag
-    max_line_bytes: int = 256
+    max_in_flight: int  # SPEC 5.3: "only a few"; must not exceed the firmware motion queue depth
+    read_poll_s: float  # how often the reader thread looks at the stop flag
+    max_line_bytes: Optional[int] = None  # None: serial.max_line_bytes of the settings (the same limit as the firmware)
     reconnect: Optional[ReconnectPolicy] = None
 
     def __post_init__(self) -> None:
@@ -490,8 +501,18 @@ class LinkSettings:
             raise ValueError("max_in_flight must be >= 1")
         if not self.read_poll_s > 0:
             raise ValueError("read_poll_s must be > 0")
-        if self.max_line_bytes < 1:
+        if self.max_line_bytes is not None and self.max_line_bytes < 1:
             raise ValueError("max_line_bytes must be >= 1")
+
+    @classmethod
+    def from_settings(cls, config: Optional[Settings] = None) -> "LinkSettings":
+        cfg = config if config is not None else get_settings()
+        return cls(
+            max_in_flight=cfg.link.max_in_flight,
+            read_poll_s=to_seconds(cfg.link.read_poll_ms),
+            max_line_bytes=cfg.serial.max_line_bytes,
+            reconnect=ReconnectPolicy.from_settings(cfg),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -504,8 +525,9 @@ class SerialLink:
 
     def __init__(self, transport: Transport, settings: Optional[LinkSettings] = None) -> None:
         self._transport = transport
-        self._settings = settings or LinkSettings()
-        self._framer = LineFramer(self._settings.max_line_bytes)
+        self._settings = settings or LinkSettings.from_settings()
+        max_line = self._settings.max_line_bytes
+        self._framer = LineFramer(max_line if max_line is not None else get_settings().serial.max_line_bytes)
         self._cond = threading.Condition()
         self._state = LinkState.STOPPED
         self._in_flight: Deque[Command] = deque()
@@ -579,7 +601,7 @@ class SerialLink:
         self._transport.close()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=_JOIN_TIMEOUT_S)
+            thread.join(timeout=to_seconds(get_settings().timeouts.thread_join_ms))
         self._thread = None
         with self._cond:
             self._state = LinkState.STOPPED

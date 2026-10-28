@@ -1,7 +1,7 @@
 """Shared helpers for the phase 2 tests: fake engine, planner builders and an FSM rig.
 
 Nothing here needs the Stockfish binary. The grasp angles below are TEST VALUES ONLY: the real
-ones are hardware values that are [TO CONFIRM] and live in config/grasp_profiles.json.
+ones are hardware values that are assumed and live in the ``grasp`` section of config/settings.yaml.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ from desktop_app.core.engine import EngineConfig, UciBackend, load_engine_config
 from desktop_app.core.fsm import Fsm, State, Trigger
 from desktop_app.core.game_state import GameState, MoveSource
 from desktop_app.core.move_planner import GraspProfiles, MovePlanner
-from desktop_app.kinematics.dimension import (
-    PROPOSED_CAPTURE_SLOTS,
-    PROPOSED_PARK_POSITION,
-    PROPOSED_RESERVE_SLOTS,
-    BoardGeometry,
-    Workspace,
-    Zones,
-)
-from desktop_app.kinematics.five_bar import MIN_SINGULARITY_MARGIN_DEG, FiveBarKinematics
+from desktop_app.kinematics.dimension import BoardGeometry, Workspace, Zones
+from desktop_app.kinematics.five_bar import FiveBarKinematics
+from desktop_app.utils.settings import get_settings
+
+# The capture, reserve and park layout and the singularity margin of config/settings.yaml, as test fixtures.
+CAPTURE_SLOTS = get_settings().layout.capture_slots.slots()
+RESERVE_SLOTS = get_settings().layout.reserve_slots.slots()
+PARK_POSITION = get_settings().layout.park.xy_mm
+MIN_SINGULARITY_MARGIN_DEG = get_settings().motion.singularity_margin_deg
 
 TEST_GRASP = {"open_deg": 100, "close_deg": {"P": 41, "N": 42, "B": 43, "R": 44, "Q": 45, "K": 46}}  # TEST ONLY
 TEST_RESERVE = (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT)
@@ -125,8 +125,8 @@ def make_geometry() -> BoardGeometry:
 
 
 def make_zones(
-    capture_slots: Optional[int] = len(PROPOSED_CAPTURE_SLOTS),
-    reserve_slots: Optional[int] = len(PROPOSED_RESERVE_SLOTS),
+    capture_slots: Optional[int] = len(CAPTURE_SLOTS),
+    reserve_slots: Optional[int] = len(RESERVE_SLOTS),
     park: bool = True,
     is_placeholder: bool = True,
 ) -> Zones:
@@ -136,16 +136,16 @@ def make_zones(
     return Zones(
         make_geometry(),
         make_workspace(),
-        capture_zone=PROPOSED_CAPTURE_SLOTS[:capture_slots] if capture_slots is not None else None,
-        reserve_zone=PROPOSED_RESERVE_SLOTS[:reserve_slots] if reserve_slots is not None else None,
-        park_position=PROPOSED_PARK_POSITION if park else None,
+        capture_zone=CAPTURE_SLOTS[:capture_slots] if capture_slots is not None else None,
+        reserve_zone=RESERVE_SLOTS[:reserve_slots] if reserve_slots is not None else None,
+        park_position=PARK_POSITION if park else None,
         is_placeholder=is_placeholder,
     )
 
 
 def make_planner(
     *,
-    capture_slots: Optional[int] = len(PROPOSED_CAPTURE_SLOTS),
+    capture_slots: Optional[int] = len(CAPTURE_SLOTS),
     reserve_pieces: tuple[chess.PieceType, ...] = TEST_RESERVE,
     workspace: Optional[Workspace] = None,
     park: bool = True,

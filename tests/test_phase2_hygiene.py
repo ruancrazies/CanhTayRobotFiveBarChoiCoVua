@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 import pytest
-import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CORE = REPO_ROOT / "desktop_app" / "core"
@@ -18,7 +16,7 @@ PHASE2_MODULES = [
     CORE / "move_planner.py",
     REPO_ROOT / "desktop_app" / "console_runner.py",
 ]
-PHASE2_FILES = [*PHASE2_MODULES, REPO_ROOT / "config" / "difficulty_levels.json"]
+PHASE2_FILES = [*PHASE2_MODULES, REPO_ROOT / "config" / "settings.yaml"]
 
 
 @pytest.mark.parametrize("path", PHASE2_FILES, ids=lambda p: p.name)
@@ -62,47 +60,4 @@ def test_core_never_depends_on_the_console_runner_or_other_front_ends() -> None:
                        for m in imported), f"{path.name} imports {imported}"
 
 
-def _hardware_numbers() -> set[float]:
-    data = yaml.safe_load((REPO_ROOT / "config" / "hardware.yaml").read_text(encoding="utf-8"))
-    found: set[float] = set()
-
-    def walk(node: object) -> None:
-        if isinstance(node, dict):
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, (list, tuple)):
-            for value in node:
-                walk(value)
-        elif isinstance(node, (int, float)) and not isinstance(node, bool) and node not in (0, 1, 2):
-            found.add(float(node))
-
-    walk(data)
-    return found | {408.5, 108.5, 191.5, 3200.0}
-
-
-# Numbers that appear in hardware.yaml by coincidence but mean something else in these modules.
-NOT_HARDWARE = {"game_state.py": {100.0}}  # 100 half-moves = the 50-move rule
-
-
-@pytest.mark.parametrize("path", PHASE2_MODULES, ids=lambda p: p.name)
-def test_no_hardware_constant_is_hard_coded(path: Path) -> None:
-    """Rule 7: dimensions, pins and drive values come from config/hardware.yaml only."""
-    hardware = _hardware_numbers() - NOT_HARDWARE.get(path.name, set())
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    hits = sorted(
-        {
-            (n.lineno, n.value)
-            for n in ast.walk(tree)
-            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool)
-            and float(n.value) in hardware
-        }
-    )
-    # The runner's PLACEHOLDER gripper angles are not hardware.yaml values; they are flagged placeholders.
-    assert hits == [], f"{path.name} hard-codes hardware numbers: {hits}"
-
-
-def test_hardware_yaml_was_not_changed_by_phase_2() -> None:
-    """Phase 2 adds no keys and changes no constant in hardware.yaml (it lists nothing to confirm)."""
-    data = yaml.safe_load((REPO_ROOT / "config" / "hardware.yaml").read_text(encoding="utf-8"))
-    assert data["to_confirm"] == []
-    assert data["geometry"]["square_size_mm"] == 31.0 and data["drive"]["gear_ratio"] == 1.0
+# Rule 7 (no hard-coded hardware constant) is enforced for every module by tests/test_no_hardcoded_constants.py.

@@ -80,7 +80,7 @@ MUST_BE_FLAGGED = [
 
 MUST_NOT_BE_FLAGGED = [
     "import logging",
-    "from desktop_app.utils.hardware_config import load_hardware_config",
+    "from desktop_app.utils.settings import load_settings",
     "from desktop_app.kinematics import five_bar",
     "from desktop_app import core",
     "from . import event_bus",

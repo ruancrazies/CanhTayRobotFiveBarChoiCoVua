@@ -1,7 +1,7 @@
 """Straight-line gripper trajectory (docs/SPEC.md section 6.3).
 
 The path from source to target is split into segments no longer than ``ds``
-(default 2 mm). Every point, the two end points included, is checked against
+(default: motion.trajectory_step_mm of config/settings.yaml). Every point, the two end points included, is checked against
 the workspace (reach and mu >= margin) BEFORE anything is returned: a bad point
 raises :class:`TrajectoryError` carrying its index, and no partial result ever
 leaves this module. Pure NumPy and math.
@@ -16,8 +16,7 @@ import numpy as np
 
 from desktop_app.kinematics.dimension import Workspace
 from desktop_app.kinematics.five_bar import KinematicsError, Point
-
-DEFAULT_MAX_SEGMENT_MM = 2.0
+from desktop_app.utils.settings import get_settings
 
 
 class TrajectoryError(KinematicsError):
@@ -69,13 +68,15 @@ def _as_point(name: str, value: Point) -> tuple[float, float]:
     return (x, y)
 
 
-def straight_line_points(start: Point, end: Point, ds: float = DEFAULT_MAX_SEGMENT_MM) -> np.ndarray:
+def straight_line_points(start: Point, end: Point, ds: float | None = None) -> np.ndarray:
     """Points of the straight line start -> end, spaced at most ``ds`` mm apart.
 
     The segment count is ``ceil(length / ds)`` and the spacing is uniform, so
     every segment is <= ds. A zero-length path is a single point, not two
     identical ones. Returns an (N, 2) array including both end points.
     """
+    if ds is None:
+        ds = get_settings().motion.trajectory_step_mm
     if not (isinstance(ds, (int, float)) and not isinstance(ds, bool) and math.isfinite(ds) and ds > 0):
         raise KinematicsError(f"ds must be a finite number > 0, got {ds!r}")
     x0, y0 = _as_point("start", start)
@@ -92,14 +93,14 @@ def straight_line(
     workspace: Workspace,
     start: Point,
     end: Point,
-    ds: float = DEFAULT_MAX_SEGMENT_MM,
+    ds: float | None = None,
 ) -> Trajectory:
     """Plan a straight-line trajectory; validate EVERY point before returning.
 
     Args:
         workspace: provides the kinematic model and the reach / mu check.
         start, end: gripper points in mm.
-        ds: maximum segment length in mm (default 2).
+        ds: maximum segment length in mm (default: motion.trajectory_step_mm).
 
     Raises:
         TrajectoryError: a point is out of reach or has mu below the workspace

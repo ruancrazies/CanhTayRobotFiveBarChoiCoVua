@@ -1,18 +1,19 @@
 """Board geometry, workspace check and special zones (docs/SPEC.md sections 4.1, 6.2, 6.4).
 
 Pure NumPy and math, no Qt or serial. Every dimension comes from
-config/hardware.yaml through the existing loader.
+config/settings.yaml through the typed loader.
 
-The capture zone, the reserve zone (each a list of slots) and the park position are
-[TO CONFIRM]. :class:`Zones` keeps each of them as ``None`` until coordinates are
+The capture zone, the reserve zone (each a list of slots) and the park position are assumed
+(not confirmed on the real board). :class:`Zones` keeps each of them as ``None`` until coordinates are
 provided, raises :class:`ZoneNotDefinedError` when one is requested too early, and
 validates every provided slot (off the board, inside the workspace, mu >= the margin).
-``Zones.proposed`` builds the owner's PROPOSED layout, which is still [TO CONFIRM].
+``Zones.from_settings`` builds the layout of the ``layout`` section of settings.yaml.
 
 The layout also carries an ``is_placeholder`` flag (SPEC 7.2, "Rules clarified in phase 2"). It is
-fail-safe: a layout is a placeholder unless the caller says it was confirmed on the real board
-(``is_placeholder=False``). ``MovePlanner.placeholders()`` reports it so the phase 3 Robot Commander
-can see that the coordinates are not real yet.
+fail-safe: a layout built by hand is a placeholder unless the caller says it was confirmed on the real board
+(``is_placeholder=False``); one built from settings is a placeholder while any ``layout.capture_slots``,
+``layout.reserve_slots`` or ``layout.park`` key is listed in ``assumed``. ``MovePlanner.placeholders()`` reports it
+so the Robot Commander can see that the coordinates are not real yet.
 """
 
 from __future__ import annotations
@@ -23,14 +24,13 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 from desktop_app.kinematics.five_bar import (
-    MIN_SINGULARITY_MARGIN_DEG,
     FiveBarKinematics,
     KinematicsError,
     OutOfReachError,
     Point,
     SingularityError,
 )
-from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
+from desktop_app.utils.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +74,8 @@ class BoardGeometry:
     extent: BoardExtent
 
     @classmethod
-    def from_config(cls, config: HardwareConfig | None = None) -> "BoardGeometry":
-        cfg = config if config is not None else load_hardware_config()
+    def from_config(cls, config: Settings | None = None) -> "BoardGeometry":
+        cfg = config if config is not None else get_settings()
         geometry = cfg.geometry
         half = geometry.board_size_mm / 2.0
         near_edge = geometry.motor_to_board_edge_mm
@@ -136,7 +136,9 @@ class Workspace:
     subclass can wrap or count it.
     """
 
-    def __init__(self, model: FiveBarKinematics, min_margin_deg: float = MIN_SINGULARITY_MARGIN_DEG) -> None:
+    def __init__(self, model: FiveBarKinematics, min_margin_deg: float | None = None) -> None:
+        if min_margin_deg is None:
+            min_margin_deg = get_settings().motion.singularity_margin_deg
         if not (math.isfinite(min_margin_deg) and 0.0 <= min_margin_deg < 90.0):
             raise KinematicsError(f"min_margin_deg must be in [0, 90), got {min_margin_deg!r}")
         self.model = model
@@ -163,19 +165,6 @@ class Workspace:
         except (OutOfReachError, SingularityError):
             return False
         return True
-
-
-def _grid(xs: tuple[float, ...], ys: tuple[float, ...]) -> tuple[Point, ...]:
-    """Slots of a rectangular grid, x-major: every y of the first x, then the next x, ..."""
-    return tuple((x, y) for x in xs for y in ys)
-
-
-# PROPOSED slot layout, [TO CONFIRM] on the real board. These are the owner's proposed
-# values (not hardware.yaml constants); ``Zones.proposed`` is the only place that uses
-# them and it logs a warning each time. The tuple order is the suggested fill order.
-PROPOSED_CAPTURE_SLOTS: tuple[Point, ...] = _grid((-190.0, -225.0, -260.0), (160.0, 195.0, 230.0, 265.0, 300.0))
-PROPOSED_RESERVE_SLOTS: tuple[Point, ...] = _grid((190.0, 225.0), (200.0, 235.0))
-PROPOSED_PARK_POSITION: Point = (0.0, 120.0)
 
 
 class Zones:
@@ -220,27 +209,34 @@ class Zones:
         self._check_distinct()
 
     @classmethod
-    def proposed(cls, board: BoardGeometry, workspace: Workspace) -> "Zones":
-        """The proposed layout (15 capture slots, 4 reserve slots, park at (0, 120)), validated.
+    def from_settings(cls, board: BoardGeometry, workspace: Workspace, config: Settings | None = None) -> "Zones":
+        """The layout of the ``layout`` section of settings.yaml (15 capture slots, 4 reserve slots, the park point), validated.
 
-        These values are [TO CONFIRM] on the real board; a warning is logged on every call. The
-        returned layout is always a placeholder (``is_placeholder`` is ``True``): confirming it means
-        building ``Zones(..., is_placeholder=False)`` from the coordinates measured on the real board.
+        It is a placeholder (``is_placeholder`` is ``True``) while any ``layout.capture_slots``, ``layout.reserve_slots``
+        or ``layout.park`` key is listed in ``assumed``, and a warning is logged on every call then. Confirming the layout
+        means measuring it on the real board, writing the values in settings.yaml and deleting those keys from ``assumed``.
         """
-        logger.warning(
-            "using the PROPOSED capture/reserve/park layout, which is [TO CONFIRM] on the real board "
-            "(%d capture slots, %d reserve slots, park %s)",
-            len(PROPOSED_CAPTURE_SLOTS),
-            len(PROPOSED_RESERVE_SLOTS),
-            PROPOSED_PARK_POSITION,
+        cfg = config if config is not None else get_settings()
+        layout = cfg.layout
+        assumed = tuple(
+            key for prefix in ("layout.capture_slots", "layout.reserve_slots", "layout.park") for key in cfg.assumed_under(prefix)
         )
+        capture, reserve = layout.capture_slots.slots(), layout.reserve_slots.slots()
+        if assumed:
+            logger.warning(
+                "using the capture/reserve/park layout of settings.yaml, which is still assumed (not confirmed on the real "
+                "board): %d capture slots, %d reserve slots, park %s",
+                len(capture),
+                len(reserve),
+                layout.park.xy_mm,
+            )
         return cls(
             board,
             workspace,
-            capture_zone=PROPOSED_CAPTURE_SLOTS,
-            reserve_zone=PROPOSED_RESERVE_SLOTS,
-            park_position=PROPOSED_PARK_POSITION,
-            is_placeholder=True,
+            capture_zone=capture,
+            reserve_zone=reserve,
+            park_position=layout.park.xy_mm,
+            is_placeholder=bool(assumed),
         )
 
     @property

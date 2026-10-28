@@ -450,10 +450,13 @@ def rig() -> Any:
 
 
 def test_link_settings_are_validated() -> None:
-    assert LinkSettings().max_in_flight >= 1
+    assert LinkSettings.from_settings().max_in_flight >= 1
+    with pytest.raises(TypeError):  # no defaults of its own: the values come from settings.yaml
+        LinkSettings()  # type: ignore[call-arg]
+    good = dict(max_in_flight=1, read_poll_s=0.01)
     for bad in ({"max_in_flight": 0}, {"read_poll_s": 0}, {"max_line_bytes": 0}):
         with pytest.raises(ValueError):
-            LinkSettings(**bad)
+            LinkSettings(**{**good, **bad})
     with pytest.raises(ValueError):
         ReconnectPolicy(interval_s=0)
     with pytest.raises(ValueError):

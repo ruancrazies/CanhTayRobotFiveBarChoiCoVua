@@ -16,6 +16,17 @@ cd firmware
 pio run -e esp32dev
 ```
 
+`include/pins.h` and `include/config.h` are GENERATED from `config/settings.yaml`. To change a pin, the baud rate or any
+other value, edit `config/settings.yaml`, then run (from the repository root)
+
+```
+python -m tools.gen_all               # rewrites pins.h, config.h and docs/CONFIG_REFERENCE.md
+python -m tools.gen_all --check       # writes nothing; exit 1 when a generated file is stale
+```
+
+and commit the result. `monitor_speed` in `platformio.ini` must be changed by hand to the same `serial.baud`
+(a test fails when they differ).
+
 All versions are pinned in `platformio.ini`. Several pins could not be checked when they were written (the
 PlatformIO registry was unreachable): **the first `pio run` is also the check of those pins.** If it fails
 while resolving a package, paste the whole output back; do not loosen the pin by hand.
@@ -52,7 +63,7 @@ if more than one serial device is plugged in.
 pio device monitor -e esp32dev --echo
 ```
 
-Baud 115200 (`kBaudRate` in `include/config.h`), Enter sends LF. `--echo` shows what you type, because the
+Baud 115200 (`serial.baud` in `config/settings.yaml`, which generates `kBaudRate` in `include/config.h`), Enter sends LF. `--echo` shows what you type, because the
 firmware does not echo. Resetting the board (the monitor does this when it opens the port) prints a few
 `ets ...` / `rst:...` lines from the ESP32 boot ROM before the firmware starts. Those are not protocol lines.
 After that the firmware prints **nothing** until you send a command.
@@ -135,7 +146,7 @@ The core already implements these rules and the host tests prove them, but nothi
 
 | Symptom | Likely cause |
 | --- | --- |
-| Garbage characters | monitor baud differs from `kBaudRate` (and `monitor_speed`) |
+| Garbage characters | monitor baud differs from `serial.baud` (and `kBaudRate`, `monitor_speed`) |
 | No reply to anything | line ending is not LF (`monitor_eol = LF`), or wrong port |
 | `error:1` for every line | a tab or non-ASCII character in the line; the protocol is printable ASCII only |
 | Boot lines at the start | normal: ESP32 boot ROM, before the firmware |

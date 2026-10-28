@@ -8,7 +8,7 @@ English build spec for AI coding agents (Claude, Cursor, etc.) and the human ope
 - Work phase by phase (section 12). Give the AI one phase plus the sections it needs, never the whole system at once.
 - Every phase has a definition of done. Do not start the next phase until it is met.
 - Touch real hardware only from phase 4. Before that, use the ESP32 simulator (phase 3).
-- Any value marked [TO CONFIRM] (section 13) must live in a config file and be asked about, never guessed.
+- Any value marked [TO CONFIRM] (section 13) must live in config/settings.yaml (listed under its `assumed:` key until it is confirmed on the real hardware) and be asked about, never guessed.
 
 ## 2. Invariant rules for the AI
 
@@ -18,7 +18,7 @@ English build spec for AI coding agents (Claude, Cursor, etc.) and the human ope
 4. **Move Detector runs only in WAIT_HUMAN.** The robot arm must never be mistaken for a human hand.
 5. **PC computes, ESP32 does real time and safety.** Never put safety logic only on the PC.
 6. **Protocol is declared once:** config/protocol_commands.py (PC) and include/protocol.h (firmware), with a test that cross-checks both.
-7. **No hard-coded hardware constants.** Everything lives in config/hardware.yaml (PC) and include/pins.h, include/config.h (firmware).
+7. **One place for every changeable value: config/settings.yaml.** A value is changeable if changing it changes behaviour, timing, geometry, limits, wiring, thresholds, sizes or paths. All of them live in config/settings.yaml, read through one typed loader (desktop_app/utils/settings.py). Per-machine values (Stockfish path, serial port) may be overridden in the git-ignored config/local.yaml, and `STOCKFISH_PATH` comes first. The firmware headers include/pins.h and include/config.h and docs/CONFIG_REFERENCE.md are GENERATED from settings.yaml (`python -m tools.gen_all`), never edited by hand; a test fails when they are stale. Only these stay in code: protocol words (commands, error codes, alarm codes), FSM transition rules, Vietnamese UI strings, mathematical or physical constants, and the PlatformIO package pins in platformio.ini. A test scans the sources for tunable literals; its single documented exception table is `ALLOWED_LITERALS` in tests/test_no_hardcoded_constants.py.
 8. **Every dangerous action has a timeout and a stop path:** Z has a timeout, Serial has a heartbeat, ESTOP is always available.
 9. **Every module has tests** (pytest on the PC; pure-logic tests on firmware where possible). A feature is not done without tests.
 10. **Code style:** type hints, leveled logging (no print), English identifiers and comments.
@@ -29,6 +29,7 @@ English build spec for AI coding agents (Claude, Cursor, etc.) and the human ope
 ```
 chess-robot/
 ├─ docs/SPEC.md
+├─ docs/CONFIG_REFERENCE.md   # GENERATED from config/settings.yaml: every key, value, unit, assumed or not
 ├─ desktop_app/
 │  ├─ main.py
 │  ├─ core/                  # must not import gui/
@@ -57,16 +58,27 @@ chess-robot/
 │  ├─ gui/                   # PySide6: tabs Play, Log, Calibration, Maintenance
 │  │  └─ strings_vi.py       # ALL Vietnamese UI text lives here
 │  └─ utils/theme.py
-├─ config/                   # hardware.yaml, difficulty_levels.json, protocol_commands.py, grasp_profiles.json
+├─ config/                   # settings.yaml (ALL changeable values), local.yaml (git-ignored overlay), local.example.yaml, protocol_commands.py
+├─ tools/                    # gen_firmware_config.py, gen_config_reference.py, gen_all.py, settings_doc.py
 ├─ data/                     # games/, models/yolo/, calibration/, correction_map.json
 ├─ tests/
 └─ firmware/                 # PlatformIO, ESP32
    ├─ platformio.ini
-   ├─ include/               # pins.h, config.h, protocol.h
+   ├─ include/               # pins.h, config.h (both GENERATED from config/settings.yaml), protocol.h
    └─ src/                   # main.cpp, serial_cmd.cpp, motion.cpp, zaxis.cpp, gripper.cpp, sensors.cpp, safety.cpp
 ```
 
-## 4. Hardware constants (source of truth)
+## 4. Hardware constants and settings (source of truth)
+
+**config/settings.yaml is the single source of truth for every changeable value.** The tables below describe the values and why they are what they are; the file holds them. Structure of the file:
+
+- Sections: `geometry`, `drive`, `pins`, `electrical` (`tb6600`, `limit_switches`, `ads1115`, `as5600`, `z_axis`, `servo`), `serial`, `timeouts`, `motion`, `firmware`, `commander`, `link`, `simulator`, `engine` (the five difficulty modes of section 9), `grasp`, `layout` (capture, reserve and park slots, reserve contents), `paths`, `logging`.
+- Units are part of the key name (`_ms`, `_us`, `_deg`, `_deg_s`, `_deg_s2`, `_mm`, `_hz`, `_bytes`, `_bits`, ...); every value has a comment directly above it saying what it is. Numbers without a unit (counts, GPIO numbers, ratios) are listed in `DIMENSIONLESS` of tools/settings_doc.py. `null` means "not decided yet": code that needs the value refuses to run, and the firmware constant is 0.
+- The top-level `assumed:` list holds the dotted key path of every value that is not yet confirmed on the real hardware (the owner replaces them later; delete the key from the list when it is confirmed). **Every assumed key must exist in settings.yaml**, and a test enforces it. Placeholder checks (grasp angles, capture/reserve/park layout, reserve contents) are derived from this list.
+- Reading: `desktop_app/utils/settings.py` loads and validates the file into frozen dataclasses. An unknown key, a missing key or a wrong type is rejected, with the dotted path in the message. Every PC module, the console runner, the Commander, the simulator and the tests read it through this loader; there is no second source.
+- Overrides, in this order of precedence: the `STOCKFISH_PATH` environment variable (the Stockfish path only), then config/local.yaml (git-ignored; copy config/local.example.yaml), then settings.yaml. local.yaml uses the same keys, can only override keys that exist, is validated like the main file and cannot change `assumed`.
+- Generated files: `python -m tools.gen_all` writes firmware/include/pins.h, firmware/include/config.h (see section 10) and docs/CONFIG_REFERENCE.md from the committed settings.yaml only (never from local.yaml or the environment). **After editing settings.yaml run `python -m tools.gen_all` and commit the result**; tests/test_generated_files.py regenerates the files in memory and fails when a committed file differs. `python -m tools.gen_all --check` does the same from the command line.
+- platformio.ini cannot read settings.yaml, so its `monitor_speed` repeats `serial.baud`; a test checks they are equal.
 
 ### 4.1 Geometry and motion
 
@@ -114,7 +126,7 @@ chess-robot/
 
 ## 5. Serial protocol
 
-Line-based text, G-code style, each command ends with a newline. Format: `NAME KEY=value ...`, for example `MOVE A=135.4 B=44.6 F=60`. Angles in degrees, lengths in mm, decimal point is a dot. Baud rate [TO CONFIRM], suggested 115200.
+Line-based text, G-code style, each command ends with a newline. Format: `NAME KEY=value ...`, for example `MOVE A=135.4 B=44.6 F=60`. Angles in degrees, lengths in mm, decimal point is a dot. Baud rate: `serial.baud` of config/settings.yaml (assumed, [TO CONFIRM]; suggested 115200).
 
 ### 5.1 Commands
 
@@ -209,13 +221,13 @@ Steps:   N = 200·f·i·(angle − angle0) / 360
 
 ### 6.4 Pick-and-place sequence
 
-`MOVE` above the source square (Z at TOP) → `ZDOWN` → `GRIP` close using the piece's grasp angle (config/grasp_profiles.json) → `ZUP` → `MOVE` above the target square → `ZDOWN` → `GRIP` open → `ZUP`.
+`MOVE` above the source square (Z at TOP) → `ZDOWN` → `GRIP` close using the piece's grasp angle (`grasp` in config/settings.yaml) → `ZUP` → `MOVE` above the target square → `ZDOWN` → `GRIP` open → `ZUP`.
 
 - **Capture:** remove the captured piece to the capture zone (off the board) first, then move the capturing piece.
 - **En passant:** the captured pawn is on a different square than the target; remove it to the capture zone, then move.
 - **Castling:** move the king first, then the rook.
 - **Promotion:** move the pawn off the board, take the new piece from the reserve zone and place it on the promotion square.
-- The capture zone (15 slots), reserve zone (4 slots) and park position (1 point) are defined in dimension.py as lists of slots. Each slot must be off the board (the border counts as board), inside the workspace and have μ ≥ 15°. Proposed values, to be confirmed on the real board: capture slots at x in {−190, −225, −260} and y in {160, 195, 230, 265, 300}; reserve slots at x in {190, 225} and y in {200, 235}; park at (0, 120), which must be outside the camera view. [TO CONFIRM: slot pitch against the piece base diameter, park position against the camera view]
+- The capture zone (15 slots), reserve zone (4 slots) and park position (1 point) are read from `layout` in config/settings.yaml by dimension.py (`Zones.from_settings`) as lists of slots. Each slot must be off the board (the border counts as board), inside the workspace and have μ ≥ 15° (`motion.singularity_margin_deg`). The slots live in the `layout` section of settings.yaml and are listed under `assumed` until measured on the real board. Current values: capture slots at x in {−190, −225, −260} and y in {160, 195, 230, 265, 300}; reserve slots at x in {190, 225} and y in {200, 235}; park at (0, 120), which must be outside the camera view. [TO CONFIRM: slot pitch against the piece base diameter, park position against the camera view]
 
 ## 7. GameState and FSM
 
@@ -305,7 +317,7 @@ After homography, crop the center of each square (skip the border) and compare w
 
 ## 9. Chess engine
 
-Stockfish over UCI with python-chess. Always query with the FEN from GameState so nothing drifts if the engine process restarts. If the engine does not answer within the time limit, restart it and reload the FEN. Config lives in config/difficulty_levels.json; a new mode takes effect from the next engine move. Internal keys are English; display names are Vietnamese (section 11).
+Stockfish over UCI with python-chess. Always query with the FEN from GameState so nothing drifts if the engine process restarts. If the engine does not answer within the time limit, restart it and reload the FEN. Config lives in the `engine` section of config/settings.yaml (path, answer margin, restarts, the five modes); a new mode takes effect from the next engine move. Internal keys are English; display names are Vietnamese (section 11).
 
 | # | Key | Display (Vietnamese) | Stockfish config | Think time |
 | --- | --- | --- | --- | --- |
@@ -341,6 +353,18 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 - **ESTOP:** stop joint pulses (short deceleration if moving fast; stop at once if triggered by a hardware button or LIMIT_Z), stop and brake Z, keep drivers enabled, set the ESTOP flag. DISABLE only when the user commands a shutdown or a driver reports over-temperature or over-current. While the flag is set only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted; every other command, including ENABLE, is `error:5`, and ENABLE works again after RESET. A repeated ESTOP while already in ESTOP is accepted and harmless.
 - **Homing:** Z first (raise slowly until limit #1), then both joints using the AS5600 angle. Every MOVE is rejected with error:4 until homed (after the error:6 check of section 5.2). HOME needs the drivers enabled when it moves the joints and never enables them itself. DISABLE clears the homed flag, so homing is mandatory after it as well; during a running HOME it aborts the joint part without a done, and it clears the whole motion queue (sections 5.1 and 5.2).
 - **External pull-downs on D34 / D35,** and 5–10 ms debounce in firmware.
+
+### 10.3 Configuration of the firmware
+
+Every pin and every tunable of the firmware (baud rate, buffer sizes, queue depth, heartbeat timeout, Z timeout factor, debounce, PWM, servo pulses, motion limits, sensor fault thresholds) is a key of config/settings.yaml (section 4). The firmware never holds a number of its own:
+
+- **include/pins.h and include/config.h are GENERATED** from config/settings.yaml by `python -m tools.gen_firmware_config` (or `python -m tools.gen_all`, which also writes docs/CONFIG_REFERENCE.md). Each starts with a "GENERATED, do not edit" banner and keeps one `constexpr` per value, preceded by its settings key, the comment written next to it in settings.yaml and an `ASSUMED` line when the key is listed under `assumed`. The generated files are committed. Do not edit them by hand and do not add a constant to them: add the key to settings.yaml and to the table in tools/gen_firmware_config.py.
+- **A `null` value is written as 0** and must never be used by accident: the stage that needs it (for example `kZFullTravelMs`, `kMaxSpeedDegPerS`) refuses to run until the key has a value.
+- **Drift is a test failure.** tests/test_generated_files.py regenerates both headers in memory and fails when a committed one differs from settings.yaml. After editing settings.yaml, run `python -m tools.gen_all` and commit the headers.
+- **include/protocol.h is not generated:** the protocol words are declared once there and in config/protocol_commands.py (rule 6).
+- **platformio.ini** keeps the PlatformIO package pins (exact versions) and `monitor_speed`, which repeats `serial.baud`; a test checks they are equal. Other firmware sources may include only pins.h, config.h and protocol.h for values; a scan (tests/test_no_hardcoded_constants.py) fails on a tunable literal in src/ and lib/chessbot_core/src/.
+- **Every assumed key must exist in settings.yaml.** This replaces the older rule that an ASSUMED constant must be listed: the list is the `assumed:` key of settings.yaml, and the header comment is generated from it.
+- **Build and host checks** (the host checks do not compile for the ESP32): `bash firmware/tools/run_host_tests.sh`, `pio test -e native`; the ESP32 build is `cd firmware && pio run -e esp32dev` (needs PlatformIO 6.2.0 and network access for the pinned packages).
 
 ## 11. Desktop GUI (PySide6) and Vietnamese UI strings
 
@@ -435,8 +459,8 @@ For each phase: give the AI one prompt, have it write tests first or together wi
 
 ### Phase 0: Project skeleton
 
-- **Work:** create the directory layout (section 3), load hardware.yaml, Event Bus, logging, pytest.
-- **Done when:** `pytest` runs; a test proves core/ does not import gui/; hardware.yaml holds every constant from section 4.
+- **Work:** create the directory layout (section 3), load config/settings.yaml, Event Bus, logging, pytest.
+- **Done when:** `pytest` runs; a test proves core/ does not import gui/; settings.yaml holds every changeable value from section 4.
 - **Prompt:** Create the project skeleton following sections 3 and 4 of the SPEC. Write a typed config loader, an Event Bus built on Qt signals, and a test proving core/ never imports gui/.
 
 ### Phase 1: Kinematics
@@ -486,13 +510,13 @@ For each phase: give the AI one prompt, have it write tests first or together wi
 
 ## 13. Open items
 
-The AI must not invent values for these; ask, then record them in hardware.yaml once known.
+The AI must not invent values for these; ask, then record them in config/settings.yaml once known (and delete the key from `assumed`).
 
 - NEMA 17 model, phase current, inductance (needed to set TB6600 DIP SW4–SW6). Note: the uploaded NEMA17.PDF is a closed-loop motor with an integrated driver, not a plain NEMA 17.
 - Mounting of each AS5600 (joint axis or motor axis). With i = 1 (direct drive, confirmed) both give the same angle, so only the physical position needs fixing.
 - Rated voltage of the Z DC motor, the drivetrain type (trapezoidal lead screw), screw pitch, and a self-locking mechanism or counterweight that holds Z when power is lost; the actual L298 module (L298N?).
 - 5 V supply for the SG90 (needs a 24 to 5 V buck converter or a separate supply).
-- Final coordinates of the capture, reserve and park slots: proposed values are in section 6.4; measure them on the real board, and check that the park position is outside the camera view and the slot pitch fits the piece base diameter.
+- Final coordinates of the capture, reserve and park slots: the current values are in section 6.4 and in `layout` of settings.yaml; measure them on the real board, and check that the park position is outside the camera view and the slot pitch fits the piece base diameter.
 - Serial baud rate, Z timeout (measure at assembly), maximum acceleration and speed, lost-step threshold (start at 3°).
 - Notation: in the original architecture document the symbol i means both lead-screw pitch and gear ratio; in this SPEC i is only the gear ratio. Fix the source document for consistency.
 

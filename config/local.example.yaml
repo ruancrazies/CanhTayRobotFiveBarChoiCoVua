@@ -1,0 +1,13 @@
+# Per-machine overrides. Copy this file to config/local.yaml (git-ignored) and keep only the lines you need.
+#
+# local.yaml uses the SAME keys as config/settings.yaml and can only override values that already exist there:
+# an unknown key, a wrong type, or an `assumed:` list is rejected. Precedence for the Stockfish path:
+#   1. the STOCKFISH_PATH environment variable   2. engine.path here   3. engine.path in settings.yaml
+
+engine:
+  # Full path of the Stockfish executable on this machine.
+  path: /path/to/stockfish
+
+serial:
+  # Serial port of the ESP32 on this machine, for example COM3 (Windows) or /dev/ttyUSB0 (Linux).
+  port: /dev/ttyUSB0

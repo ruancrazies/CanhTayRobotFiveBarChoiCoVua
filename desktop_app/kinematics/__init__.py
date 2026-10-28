@@ -9,7 +9,6 @@ from desktop_app.kinematics.dimension import (
     Zones,
 )
 from desktop_app.kinematics.five_bar import (
-    MIN_SINGULARITY_MARGIN_DEG,
     FiveBarKinematics,
     InvalidPoseError,
     KinematicsError,
@@ -17,7 +16,6 @@ from desktop_app.kinematics.five_bar import (
     SingularityError,
 )
 from desktop_app.kinematics.trajectory import (
-    DEFAULT_MAX_SEGMENT_MM,
     Trajectory,
     TrajectoryError,
     straight_line,
@@ -25,8 +23,6 @@ from desktop_app.kinematics.trajectory import (
 )
 
 __all__ = [
-    "DEFAULT_MAX_SEGMENT_MM",
-    "MIN_SINGULARITY_MARGIN_DEG",
     "BoardExtent",
     "BoardGeometry",
     "FiveBarKinematics",

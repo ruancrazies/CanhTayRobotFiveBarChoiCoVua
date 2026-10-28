@@ -9,8 +9,8 @@ Conventions
 * Origin O is the midpoint of the two motor axes, +Y points toward the board.
   Motor #1 (angle alpha) is at (-l/2, 0), motor #2 (angle beta) at (+l/2, 0).
 * The elbows-out configuration is the only one supported.
-* Every constant (l, m, n and the drive chain f, i) comes from
-  config/hardware.yaml through :mod:`desktop_app.utils.hardware_config`;
+* Every constant (l, m, n and the drive chain f, i) and the singularity margin come from
+  config/settings.yaml through :mod:`desktop_app.utils.settings`;
   nothing hardware-specific is hard-coded here.
 
 Jacobian
@@ -35,11 +35,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
-
-# SPEC 6.2: require mu >= 15 degrees at every pick point and every trajectory point.
-# Overridable per call (``min_margin_deg=``) and per Workspace.
-MIN_SINGULARITY_MARGIN_DEG = 15.0
+from desktop_app.utils.settings import Settings, get_settings
 
 # Numerical-zero threshold for the elbow distance AB (mm). An AB this small means
 # both elbows coincide, which is not a valid pose (the perpendicular direction
@@ -112,9 +108,9 @@ class FiveBarKinematics:
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def from_config(cls, config: HardwareConfig | None = None) -> "FiveBarKinematics":
-        """Build the model from the hardware config (default: config/hardware.yaml)."""
-        cfg = config if config is not None else load_hardware_config()
+    def from_config(cls, config: Settings | None = None) -> "FiveBarKinematics":
+        """Build the model from the settings (default: config/settings.yaml)."""
+        cfg = config if config is not None else get_settings()
         return cls(
             l=cfg.geometry.motor_axis_distance_mm,
             m=cfg.geometry.driving_link_mm,
@@ -294,15 +290,15 @@ class FiveBarKinematics:
         """Jacobian condition number at a gripper point (via IK)."""
         return self.condition_number(*self.ik(x, y))
 
-    def ik_checked(
-        self, x: float, y: float, min_margin_deg: float = MIN_SINGULARITY_MARGIN_DEG
-    ) -> tuple[float, float]:
-        """IK that also enforces ``mu >= min_margin_deg``.
+    def ik_checked(self, x: float, y: float, min_margin_deg: float | None = None) -> tuple[float, float]:
+        """IK that also enforces ``mu >= min_margin_deg`` (default: motion.singularity_margin_deg of the settings).
 
         Raises:
             OutOfReachError: the point is out of reach.
             SingularityError: the point is reachable but mu is below the margin.
         """
+        if min_margin_deg is None:
+            min_margin_deg = get_settings().motion.singularity_margin_deg
         alpha, beta = self.ik(x, y)
         elbow_a, elbow_b = self._elbows(alpha, beta)
         mu = self._margin(elbow_a, elbow_b, np.array([x, y], dtype=float), self.motor1_xy, self.motor2_xy)

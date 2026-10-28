@@ -212,8 +212,8 @@ def test_the_declaration_adds_no_hardware_value() -> None:
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool)
     }
     assert numbers <= {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 180.0}, numbers
-    hardware = yaml.safe_load((REPO_ROOT / "config" / "hardware.yaml").read_text(encoding="utf-8"))
-    assert "protocol" not in hardware and "baud" not in str(hardware).lower()  # baud is [TO CONFIRM]: not invented here
+    settings = yaml.safe_load((REPO_ROOT / "config" / "settings.yaml").read_text(encoding="utf-8"))
+    assert "protocol" not in settings  # the protocol words are declared once, in protocol_commands.py, never in settings.yaml
 
 
 # --------------------------------------------------------------------------- #

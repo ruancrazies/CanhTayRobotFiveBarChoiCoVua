@@ -495,11 +495,12 @@ def test_the_human_is_asked_for_a_move_only_in_wait_human(tmp_path: Path) -> Non
 # --------------------------------------------------------------------------- #
 
 
-def test_the_command_line_refuses_to_run_on_unconfirmed_hardware_values_without_the_flag(
+def test_the_command_line_refuses_to_run_on_assumed_values_without_the_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert console_runner.main(["--data-dir", "unused"]) == 2
-    assert "TO CONFIRM" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "assumed" in out and "config/settings.yaml" in out
 
 
 def test_the_command_line_plays_with_placeholders_and_says_so(

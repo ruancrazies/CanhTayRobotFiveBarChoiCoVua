@@ -16,7 +16,7 @@ from config.protocol_commands import AlarmCode, CommandName, ErrorCode
 from desktop_app.core.fsm import HOMING_MANDATORY_ALARMS, State, Trigger
 from desktop_app.hardware.robot_commander import CommandFailedError, NotAtStartError, NotReadyError, RobotAlarmError
 from desktop_app.hardware.esp32_simulator import Esp32Simulator
-from desktop_app.utils.hardware_config import load_hardware_config
+from desktop_app.utils.settings import get_settings
 from phase3_support import SCENARIOS, Stack, build_stack
 from sim_support import wait_for
 
@@ -37,7 +37,7 @@ def fault_when(stack: Stack, command: str, nth: int, inject: Callable[[Esp32Simu
 
 
 def step_loss_offset() -> float:
-    return load_hardware_config().electrical.as5600.system_error_deg * 3  # clearly beyond the sensor error
+    return get_settings().electrical.as5600.system_error_deg * 3  # clearly beyond the sensor error
 
 
 FAULTS: dict[str, tuple[str, int, Callable[[Esp32Simulator], None], str]] = {

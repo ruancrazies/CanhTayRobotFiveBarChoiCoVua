@@ -3,9 +3,11 @@
 These tests read the firmware files as text. They do not compile anything; the C++ tests run with
 ``pio test -e native`` or ``firmware/tools/run_host_tests.sh``.
 
-* platformio.ini: every version is pinned exactly, and the monitor baud equals ``kBaudRate``.
-* config.h / pins.h agree with config/hardware.yaml and docs/SPEC.md section 4.2; every value the SPEC
-  leaves open carries a ``TODO(confirm)``.
+* platformio.ini: every version is pinned exactly, and the monitor baud equals ``serial.baud`` of
+  config/settings.yaml (and so ``kBaudRate``).
+* config.h / pins.h are generated from config/settings.yaml (tests/test_generated_files.py checks they are
+  current); here they are checked against the values and against docs/SPEC.md section 4.2. Every value that
+  settings.yaml lists under ``assumed`` carries an ``ASSUMED`` marker in the header.
 * The hardware-independent core includes nothing from Arduino or the ESP32 SDK.
 * main.cpp holds no number of its own and puts the pin levels first in ``setup()`` (SPEC 10.2).
 """
@@ -28,7 +30,7 @@ PROTOCOL_H = FIRMWARE / "include" / "protocol.h"
 MAIN_CPP = FIRMWARE / "src" / "main.cpp"
 CORE_DIR = FIRMWARE / "lib" / "chessbot_core" / "src"
 SPEC = REPO_ROOT / "docs" / "SPEC.md"
-HARDWARE_YAML = REPO_ROOT / "config" / "hardware.yaml"
+SETTINGS_YAML = REPO_ROOT / "config" / "settings.yaml"
 
 CORE_FILES = sorted(p for p in CORE_DIR.iterdir() if p.suffix in {".h", ".cpp"})
 
@@ -69,8 +71,8 @@ def pins() -> dict[str, str]:
 
 
 @pytest.fixture(scope="module")
-def hardware() -> dict:
-    return yaml.safe_load(HARDWARE_YAML.read_text(encoding="utf-8"))
+def settings() -> dict:
+    return yaml.safe_load(SETTINGS_YAML.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -84,8 +86,16 @@ def test_the_two_environments_exist(ini: configparser.ConfigParser) -> None:
     assert ini["env:esp32dev"]["framework"] == "arduino"
 
 
-def test_monitor_baud_equals_the_baud_in_config_h(ini: configparser.ConfigParser, config: dict[str, str]) -> None:
-    assert int(ini["env:esp32dev"]["monitor_speed"]) == int(_number(config["kBaudRate"])) == 115200
+def test_monitor_baud_equals_the_baud_of_settings_yaml(
+    ini: configparser.ConfigParser, config: dict[str, str], settings: dict
+) -> None:
+    """platformio.ini cannot read settings.yaml, so its monitor_speed is a copy that this test keeps honest."""
+    assert int(ini["env:esp32dev"]["monitor_speed"]) == settings["serial"]["baud"] == int(_number(config["kBaudRate"]))
+
+
+def test_the_baud_is_not_repeated_anywhere_else_in_platformio_ini(ini: configparser.ConfigParser) -> None:
+    text = INI.read_text(encoding="utf-8")
+    assert len(re.findall(r"\bmonitor_speed\b", text)) == 1 and "upload_speed" not in text
 
 
 def test_monitor_line_ending_is_lf(ini: configparser.ConfigParser) -> None:
@@ -134,45 +144,61 @@ def test_an_unpinned_ini_would_be_caught() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# config.h and pins.h against hardware.yaml and the SPEC
+# config.h and pins.h against settings.yaml and the SPEC
 # --------------------------------------------------------------------------- #
 
-TO_CONFIRM_CONSTANTS = [
-    "kBaudRate",
-    "kQueueDepth",
-    "kHeartbeatTimeoutMs",
-    "kZFullTravelMs",
-    "kMaxAccelDegPerS2",
-    "kMaxSpeedDegPerS",
-    "kDirectionChangeDelayUs",
-    "kStepLossThresholdDeg",
-]
+def _constant_of_each_key() -> dict[str, str]:
+    from tools.gen_firmware_config import firmware_constants
+
+    return firmware_constants()
 
 
-@pytest.mark.parametrize("name", TO_CONFIRM_CONSTANTS)
-def test_every_open_value_is_marked_todo_confirm(name: str) -> None:
-    lines = CONFIG_H.read_text(encoding="utf-8").splitlines()
+def _assumed_keys() -> list[str]:
+    raw = yaml.safe_load(SETTINGS_YAML.read_text(encoding="utf-8"))
+    return [key for key in raw["assumed"] if key in _constant_of_each_key()]
+
+
+def test_some_firmware_constants_are_assumed() -> None:
+    assert {"serial.baud", "serial.queue_depth", "timeouts.heartbeat_timeout_ms"} <= set(_assumed_keys())
+
+
+@pytest.mark.parametrize("key", _assumed_keys())
+def test_every_assumed_value_is_marked_assumed_in_the_header(key: str) -> None:
+    name = _constant_of_each_key()[key]
+    header = PINS_H if name in _constants(PINS_H) else CONFIG_H
+    lines = header.read_text(encoding="utf-8").splitlines()
     index = next(i for i, line in enumerate(lines) if re.search(rf"\b{name}\b\s*=", line))
     window = "\n".join(lines[max(0, index - 4) : index + 1])
-    assert "TODO(confirm)" in window, f"{name} is a [TO CONFIRM] value without a TODO(confirm) comment"
+    assert "ASSUMED" in window, f"{name} ({key}) is in `assumed` but its header comment does not say so"
 
 
-def test_unset_values_are_zero_so_they_cannot_be_used_by_accident(config: dict[str, str]) -> None:
-    for name in ("kZFullTravelMs", "kMaxAccelDegPerS2", "kMaxSpeedDegPerS", "kDirectionChangeDelayUs"):
-        assert _number(config[name]) == 0, name
+def test_unset_values_are_zero_so_they_cannot_be_used_by_accident(config: dict[str, str], settings: dict) -> None:
+    """A null in settings.yaml becomes 0 in the header; the stage that needs it must refuse to run until it is set."""
+    by_key = _constant_of_each_key()
+    nulls = [key for key in by_key if _lookup(settings, key) is None]
+    assert {"electrical.z_axis.full_travel_ms", "motion.max_accel_deg_s2", "motion.max_speed_deg_s", "motion.direction_change_delay_us"} <= set(nulls)
+    for key in nulls:
+        assert _number(config[by_key[key]]) == 0, key
 
 
-def test_config_h_agrees_with_hardware_yaml(config: dict[str, str], hardware: dict) -> None:
-    electrical = hardware["electrical"]
+def _lookup(data: dict, dotted: str) -> object:
+    node: object = data
+    for part in dotted.split("."):
+        node = node[part]  # type: ignore[index]
+    return node
+
+
+def test_config_h_agrees_with_settings_yaml(config: dict[str, str], settings: dict) -> None:
+    electrical = settings["electrical"]
     assert _number(config["kZMotorPwmHz"]) == electrical["z_axis"]["pwm_frequency_hz"]
     assert _number(config["kZTimeoutFactor"]) == electrical["z_axis"]["timeout_factor"]
     assert _number(config["kServoPwmHz"]) == electrical["servo"]["pwm_frequency_hz"]
-    assert _number(config["kServoPulseMinUs"]) == electrical["servo"]["pulse_us_at_0_deg"]
-    assert _number(config["kServoPulseMaxUs"]) == electrical["servo"]["pulse_us_at_180_deg"]
+    assert _number(config["kServoPulseMinUs"]) == electrical["servo"]["pulse_at_0_deg_us"]
+    assert _number(config["kServoPulseMaxUs"]) == electrical["servo"]["pulse_at_180_deg_us"]
     assert _number(config["kSensorRMin"]) == electrical["as5600"]["r_fault_low"]
     assert _number(config["kSensorRMax"]) == electrical["as5600"]["r_fault_high"]
     limits = electrical["limit_switches"]
-    assert limits["debounce_ms_min"] <= _number(config["kDebounceMs"]) <= limits["debounce_ms_max"]
+    assert limits["debounce_min_ms"] <= _number(config["kDebounceMs"]) <= limits["debounce_max_ms"]
     assert config["kTb6600EnaLevelEnabled"] == "true" and electrical["tb6600"]["ena_level_driver_enabled"] == "HIGH"
     assert config["kTb6600EnaLevelDisabled"] == "false" and electrical["tb6600"]["ena_level_driver_disabled"] == "LOW"
 
@@ -184,8 +210,8 @@ def test_pwm_channels_do_not_collide(config: dict[str, str]) -> None:
     assert (z // 2) % 4 != (servo // 2) % 4
 
 
-def test_pins_h_matches_hardware_yaml(pins: dict[str, str], hardware: dict) -> None:
-    yaml_pins = hardware["pins"]
+def test_pins_h_matches_settings_yaml(pins: dict[str, str], settings: dict) -> None:
+    yaml_pins = settings["pins"]
     expected = {
         "kTb6600Ena1": yaml_pins["joint1"]["ena"],
         "kTb6600Dir1": yaml_pins["joint1"]["dir"],
@@ -201,10 +227,10 @@ def test_pins_h_matches_hardware_yaml(pins: dict[str, str], hardware: dict) -> N
         "kServoPwm": yaml_pins["servo_pwm"],
         "kLimitTop": yaml_pins["limit_top"],
         "kLimitBottom": yaml_pins["limit_bottom"],
-        "kAds1115I2cAddress": hardware["electrical"]["ads1115"]["address"],
+        "kAds1115I2cAddress": settings["electrical"]["ads1115"]["address"],
     }
     assert {name: int(_number(pins[name])) if not pins[name].startswith("0x") else int(pins[name], 16) for name in expected} == expected
-    assert set(pins) == set(expected), "pins.h has a constant that hardware.yaml does not know about (or the reverse)"
+    assert set(pins) == set(expected), "pins.h has a constant that settings.yaml does not know about (or the reverse)"
 
 
 def test_pins_h_matches_the_spec_pin_table(pins: dict[str, str]) -> None:
@@ -263,7 +289,7 @@ def _decimal_literals(text: str) -> list[str]:
 
 
 def test_main_cpp_has_no_number_of_its_own() -> None:
-    """Every value comes from config.h / pins.h. Only 0 (a comparison) and 1 are allowed."""
+    """Every value comes from the generated config.h / pins.h. Only 0 (a comparison) and 1 are allowed."""
     literals = _decimal_literals(MAIN_CPP.read_text(encoding="utf-8"))
     assert set(literals) <= {"0"}, f"main.cpp hard-codes {sorted(set(literals) - {'0'})}"
     assert "0x" not in _code_only(MAIN_CPP.read_text(encoding="utf-8"))

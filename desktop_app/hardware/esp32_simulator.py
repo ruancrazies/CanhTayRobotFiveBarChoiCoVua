@@ -18,9 +18,10 @@ SPEC 5.1, 5.2 and 10.2:
 * injectable faults: ESTOP (a hardware button), LIMIT_Z, Z_TIMEOUT (Z stalls), SENSOR_FAULT,
   STEP_LOSS and a lost connection (the cable is cut; the heartbeat then times out by itself).
 
-Every value the SPEC leaves [TO CONFIRM] (queue depth, Z travel time, heartbeat threshold, homing
-time, start angles) is a REQUIRED setting of :class:`SimConfig`: the simulator invents none of them.
-The Z timeout factor and the steps per revolution come from ``config/hardware.yaml``.
+Every value is a setting of :class:`SimConfig`, and :meth:`SimConfig.from_settings` fills it from
+``config/settings.yaml`` (queue depth, heartbeat threshold, Z timeout factor, steps per revolution, poll interval,
+line limit, firmware version, start position). A value that is still null there (Z travel time, homing time, start
+angles) must be passed explicitly: the simulator invents none of them.
 
 Interpretations the SPEC does not spell out (reported in the phase 3 summary):
 
@@ -49,7 +50,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Optional
+from typing import Any, Callable, Deque, Optional
 
 from config.protocol_commands import ACCEPTED_IN_ESTOP, CHECK_ORDER, PROTOCOL_VERSION, AlarmCode, CommandName, ErrorCode, ZState
 from desktop_app.hardware.protocol import (
@@ -69,31 +70,29 @@ from desktop_app.hardware.serial_link import (
     Transport,
     loopback_pair,
 )
-from desktop_app.utils.hardware_config import HardwareConfig, load_hardware_config
+from desktop_app.utils.settings import ConfigError, Settings, get_settings, to_seconds
 
 logger = logging.getLogger(__name__)
-
-_JOIN_TIMEOUT_S = 3.0  # how long stop() waits for a worker thread
 
 JointLimits = tuple[tuple[float, float], tuple[float, float]]  # ((alpha_min, alpha_max), (beta_min, beta_max))
 
 
 @dataclass(frozen=True)
 class SimConfig:
-    """Everything the simulated firmware needs. No default for a [TO CONFIRM] value."""
+    """Everything the simulated firmware needs. No field has a default: build it with :meth:`from_settings`."""
 
-    queue_capacity: int  # depth of the motion queue (firmware setting, [TO CONFIRM])
-    z_travel_s: float  # time for the full Z travel TOP <-> BOTTOM (measured at assembly, [TO CONFIRM])
-    heartbeat_timeout_s: float  # PING gap that stops the arm ([TO CONFIRM])
-    home_joints_s: float  # time the joint homing takes ([TO CONFIRM])
-    initial_joint_deg: tuple[float, float]  # joint angles at power-up
-    z_timeout_factor: float  # per-move Z timeout = factor x full travel (hardware.yaml)
-    pulses_per_rev: float  # 200 * f * i (hardware.yaml)
-    joint_limits_deg: Optional[JointLimits] = None  # None: no joint limit is modelled
-    initial_z: ZState = ZState.TOP
-    firmware_version: str = "sim"
-    poll_s: float = 0.002  # how often the serving thread wakes to run its timers
-    max_line_bytes: int = 256
+    queue_capacity: int  # depth of the motion queue (serial.queue_depth)
+    z_travel_s: float  # time for the full Z travel TOP <-> BOTTOM (electrical.z_axis.full_travel_ms, measured at assembly)
+    heartbeat_timeout_s: float  # PING gap that stops the arm (timeouts.heartbeat_timeout_ms)
+    home_joints_s: float  # time the joint homing takes (simulator.home_joints_ms)
+    initial_joint_deg: tuple[float, float]  # joint angles at power-up (simulator.initial_alpha_deg / initial_beta_deg)
+    z_timeout_factor: float  # per-move Z timeout = factor x full travel (electrical.z_axis.timeout_factor)
+    pulses_per_rev: float  # 200 * f * i (drive section)
+    joint_limits_deg: Optional[JointLimits]  # None: no joint limit is modelled (motion.joint_limits)
+    initial_z: ZState  # simulator.initial_z
+    firmware_version: str  # simulator.firmware_version
+    poll_s: float  # how often the serving thread wakes to run its timers (simulator.poll_ms)
+    max_line_bytes: int  # serial.max_line_bytes
 
     def __post_init__(self) -> None:
         if self.queue_capacity < 1:
@@ -111,29 +110,67 @@ class SimConfig:
             raise ValueError("firmware_version must be one token")
 
     @classmethod
-    def from_hardware(
+    def from_settings(
         cls,
+        config: Optional[Settings] = None,
         *,
-        queue_capacity: int,
-        z_travel_s: float,
-        heartbeat_timeout_s: float,
-        home_joints_s: float,
-        initial_joint_deg: tuple[float, float],
-        hardware: Optional[HardwareConfig] = None,
-        **extra: object,
+        queue_capacity: Optional[int] = None,
+        z_travel_s: Optional[float] = None,
+        heartbeat_timeout_s: Optional[float] = None,
+        home_joints_s: Optional[float] = None,
+        initial_joint_deg: Optional[tuple[float, float]] = None,
+        **override: object,
     ) -> "SimConfig":
-        """Build a config whose derived values come from ``config/hardware.yaml``."""
-        hw = hardware or load_hardware_config()
-        return cls(
-            queue_capacity=queue_capacity,
-            z_travel_s=z_travel_s,
-            heartbeat_timeout_s=heartbeat_timeout_s,
-            home_joints_s=home_joints_s,
-            initial_joint_deg=initial_joint_deg,
-            z_timeout_factor=hw.electrical.z_axis.timeout_factor,
-            pulses_per_rev=hw.drive.pulses_per_rev,
-            **extra,  # type: ignore[arg-type]
+        """A config filled from config/settings.yaml; an argument overrides the file.
+
+        Raises:
+            ConfigError: a value is neither passed nor set in settings.yaml (it is null there).
+        """
+        cfg = config if config is not None else get_settings()
+
+        def pick(name: str, given: Optional[Any], from_file: Optional[Any], key: str) -> Any:
+            value = given if given is not None else from_file
+            if value is None:
+                raise ConfigError(f"SimConfig needs {name}: pass it, or give {key} a value in config/settings.yaml")
+            return value
+
+        sim = cfg.simulator
+        joints = initial_joint_deg
+        if joints is None and sim.initial_alpha_deg is not None and sim.initial_beta_deg is not None:
+            joints = (sim.initial_alpha_deg, sim.initial_beta_deg)
+        limits = cfg.motion.joint_limits
+        values: dict[str, Any] = dict(
+            queue_capacity=pick("queue_capacity", queue_capacity, cfg.serial.queue_depth, "serial.queue_depth"),
+            z_travel_s=pick(
+                "z_travel_s",
+                z_travel_s,
+                to_seconds(cfg.electrical.z_axis.full_travel_ms) if cfg.electrical.z_axis.full_travel_ms is not None else None,
+                "electrical.z_axis.full_travel_ms",
+            ),
+            heartbeat_timeout_s=pick(
+                "heartbeat_timeout_s", heartbeat_timeout_s, to_seconds(cfg.timeouts.heartbeat_timeout_ms), "timeouts.heartbeat_timeout_ms"
+            ),
+            home_joints_s=pick(
+                "home_joints_s",
+                home_joints_s,
+                to_seconds(sim.home_joints_ms) if sim.home_joints_ms is not None else None,
+                "simulator.home_joints_ms",
+            ),
+            initial_joint_deg=pick("initial_joint_deg", joints, None, "simulator.initial_alpha_deg and initial_beta_deg"),
+            z_timeout_factor=cfg.electrical.z_axis.timeout_factor,
+            pulses_per_rev=cfg.drive.pulses_per_rev,
+            joint_limits_deg=(
+                ((limits.alpha_min_deg, limits.alpha_max_deg), (limits.beta_min_deg, limits.beta_max_deg))
+                if limits.configured
+                else None
+            ),
+            initial_z=ZState(sim.initial_z),
+            firmware_version=sim.firmware_version,
+            poll_s=to_seconds(sim.poll_ms),
+            max_line_bytes=cfg.serial.max_line_bytes,
         )
+        values.update(override)
+        return cls(**values)
 
     @property
     def z_timeout_s(self) -> float:
@@ -329,7 +366,7 @@ class Esp32Simulator:
         self._transport.close()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=_JOIN_TIMEOUT_S)
+            thread.join(timeout=to_seconds(get_settings().timeouts.thread_join_ms))
         self._thread = None
         self._link_up = False
 

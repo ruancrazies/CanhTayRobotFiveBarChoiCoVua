@@ -17,16 +17,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
-def _isolate_engine_path_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """A developer's own STOCKFISH_PATH or config/local.json must never change a test outcome.
+def _isolate_settings_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """A developer's own STOCKFISH_PATH or config/local.yaml must never change a test outcome.
 
-    Tests that exercise the overrides pass their own ``environ`` / ``local_config_path`` (or set
-    these two things themselves, after this fixture has run).
+    Tests that exercise the overrides pass their own ``environ`` / ``local_path`` (or set these two things
+    themselves, after this fixture has run).
     """
-    from desktop_app.core import engine
+    from desktop_app.utils import settings
 
-    monkeypatch.delenv(engine.STOCKFISH_PATH_ENV, raising=False)
-    monkeypatch.setattr(engine, "DEFAULT_LOCAL_CONFIG_PATH", tmp_path_factory.getbasetemp() / "no-local-config.json")
+    monkeypatch.delenv(settings.STOCKFISH_PATH_ENV, raising=False)
+    monkeypatch.setattr(settings, "DEFAULT_LOCAL_PATH", tmp_path_factory.getbasetemp() / "no-local-settings.yaml")
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +47,7 @@ def _drop_handlers_a_test_left_on_the_root_logger() -> Any:
 
 
 @pytest.fixture
-def hardware_yaml_data() -> dict[str, Any]:
-    """A fresh, mutable copy of the parsed default config/hardware.yaml."""
-    with (REPO_ROOT / "config" / "hardware.yaml").open(encoding="utf-8") as handle:
+def settings_yaml_data() -> dict[str, Any]:
+    """A fresh, mutable copy of the parsed default config/settings.yaml."""
+    with (REPO_ROOT / "config" / "settings.yaml").open(encoding="utf-8") as handle:
         return yaml.safe_load(handle)
