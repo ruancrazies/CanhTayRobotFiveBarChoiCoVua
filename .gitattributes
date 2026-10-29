@@ -1,0 +1,4 @@
+firmware/include/pins.h text eol=lf
+firmware/include/config.h text eol=lf
+docs/CONFIG_REFERENCE.md text eol=lf
+*.sh text eol=lf
