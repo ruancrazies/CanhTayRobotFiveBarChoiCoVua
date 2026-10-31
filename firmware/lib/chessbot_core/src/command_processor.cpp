@@ -9,10 +9,13 @@ using protocol::AlarmCode;
 using protocol::Cmd;
 using protocol::ErrorCode;
 
-CommandProcessor::CommandProcessor(ResponseSink* sink, HardwareOps* hardware, const MotionConfig& motion)
+CommandProcessor::CommandProcessor(ResponseSink* sink, HardwareOps* hardware, const MotionConfig& motion, const ZConfig& z)
     : sink_(sink),
       hardware_(hardware),
       motion_(motion),
+      z_axis_(z),
+      z_applied_drive_(ZDrive::kCoast),  // the boot state of the pins: every L298 pin LOW (SPEC 10.2)
+      z_applied_duty_(0),
       accel_deg_s2_(motion.max_accel_deg_s2),
       commanded_deg_{0, 0},
       move_running_(false),
@@ -104,11 +107,17 @@ void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
     case Cmd::kPOS:
       do_pos();
       return;
-    // Not implemented yet: parsed above, answered error:1 until their stage (HOME and GRIP later, Z in S2).
-    case Cmd::kHOME:
+    // Not implemented yet: parsed above, answered error:1 until their stage (HOME and GRIP later).
     case Cmd::kZUP:
+      do_z_move(true, now_ms);
+      return;
     case Cmd::kZDOWN:
+      do_z_move(false, now_ms);
+      return;
     case Cmd::kZSTOP:
+      do_zstop();
+      return;
+    case Cmd::kHOME:
     case Cmd::kGRIP:
     case Cmd::kCount:
       send_error(ErrorCode::kUNRECOGNIZED);
@@ -148,7 +157,8 @@ bool CommandProcessor::passes_gates(const Command& command) {
     return false;
   }
   if (command.id == Cmd::kMOVE) {
-    if (!state_.homed() && !motion_.bench_move_without_homing) {
+    // Check 4: not homed (the bench setting skips this part only), or Z not at TOP (the joints must not move with Z down).
+    if ((!state_.homed() && !motion_.bench_move_without_homing) || z_axis_.state() != protocol::ZState::kTOP) {
       send_error(ErrorCode::kNOT_HOMED);
       return false;
     }
@@ -204,7 +214,7 @@ void CommandProcessor::do_pos() {
   report.sensor_b_deg = 0;
   report.steps_a = steps[kJointAlpha];
   report.steps_b = steps[kJointBeta];
-  report.z_state = protocol::name_of(protocol::ZState::kMID);  // no limit switch is read before stage 4b-2
+  report.z_state = protocol::name_of(z_axis_.state());
   char line[config::kMaxResponseBytes + 1];
   if (format_pos(line, sizeof(line), report)) {
     sink_->write_line(line);
@@ -290,6 +300,8 @@ void CommandProcessor::do_enable(bool enable) {
 // again and the alarm is sent again (SPEC 5.1).
 void CommandProcessor::do_estop() {
   hardware_->halt_motion_outputs();
+  z_axis_.stop();
+  apply_z_drive();
   clear_motion_queue();
   state_.enter_estop();
   send_alarm(AlarmCode::kESTOP);
@@ -297,6 +309,8 @@ void CommandProcessor::do_estop() {
 
 void CommandProcessor::do_reset() {
   hardware_->stop_joint_pulses();  // a running MOVE does not survive a RESET (SPEC 5.1, "Cancelled done")
+  z_axis_.reset();                 // Z is braked too, and a latched LIMIT_Z is acknowledged
+  apply_z_drive();
   clear_motion_queue();
   state_.reset();
   send_ok();
@@ -307,9 +321,73 @@ void CommandProcessor::tick(uint32_t now_ms) {
     return;
   }
   hardware_->halt_motion_outputs();  // the drivers stay enabled
+  z_axis_.stop();
+  apply_z_drive();
   clear_motion_queue();
   state_.enter_heartbeat_timeout();
   send_alarm(AlarmCode::kHB_TIMEOUT);
+}
+
+// ZUP / ZDOWN: ok, then done when the limit switch has been reached (at once when Z is already there). A Z move that is
+// running is replaced. The joint drivers play no part: Z is a DC motor. An unmeasured travel time (null in settings.yaml)
+// refuses the move, because the timeout cannot be computed.
+void CommandProcessor::do_z_move(bool toward_top, uint32_t now_ms) {
+  const ZAxis::StartResult result = z_axis_.start(toward_top, now_ms);
+  if (result == ZAxis::StartResult::kNotConfigured) {
+    send_error(ErrorCode::kBAD_PARAMETER);
+    return;
+  }
+  apply_z_drive();
+  send_ok();
+  if (result == ZAxis::StartResult::kAlreadyThere) {
+    send_done();
+  }
+}
+
+// ZSTOP: stop and brake Z at once; the done of a ZUP / ZDOWN that was running is cancelled. A HOME that is waiting for
+// Z (stage 4b-3) will be aborted here too.
+void CommandProcessor::do_zstop() {
+  z_axis_.stop();
+  apply_z_drive();
+  send_ok();
+}
+
+void CommandProcessor::apply_z_drive() {
+  const ZDrive drive = z_axis_.drive();
+  const uint8_t duty = z_axis_.duty_percent();
+  if (drive != z_applied_drive_ || duty != z_applied_duty_) {
+    z_applied_drive_ = drive;
+    z_applied_duty_ = duty;
+    hardware_->drive_z(drive, duty);
+  }
+}
+
+void CommandProcessor::emergency_stop_for(AlarmCode alarm) {
+  hardware_->halt_motion_outputs();
+  z_axis_.stop();
+  apply_z_drive();
+  clear_motion_queue();
+  state_.trip(alarm);
+  send_alarm(alarm);
+}
+
+void CommandProcessor::poll_z(uint32_t now_ms) {
+  const ZEvent event = z_axis_.poll(now_ms, hardware_->limit_actuated(ZLimit::kTop), hardware_->limit_actuated(ZLimit::kBottom));
+  apply_z_drive();
+  switch (event) {
+    case ZEvent::kNone:
+      return;
+    case ZEvent::kDone:
+      send_done();
+      return;
+    case ZEvent::kTimeout:  // Z is braked; homing is mandatory (SPEC 5.3)
+      state_.raise_alarm(AlarmCode::kZ_TIMEOUT);
+      send_alarm(AlarmCode::kZ_TIMEOUT);
+      return;
+    case ZEvent::kLimitZ:
+      emergency_stop_for(AlarmCode::kLIMIT_Z);
+      return;
+  }
 }
 
 bool CommandProcessor::try_enqueue(const Command& command) {

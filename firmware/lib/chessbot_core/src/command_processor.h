@@ -32,6 +32,7 @@
 #include "command_queue.h"
 #include "device_state.h"
 #include "motion.h"
+#include "z_axis.h"
 #include "project_headers.h"
 
 namespace chessbot {
@@ -65,6 +66,12 @@ class HardwareOps {
   // Steps issued so far on ``joint`` (kJointAlpha or kJointBeta), counted from power-up; it follows the joint while it
   // runs and equals the target once it has arrived.
   virtual int32_t joint_steps_issued(uint8_t joint) = 0;
+  // Drive the Z motor (L298): kRaise / kLower at ``duty_percent``, kBrake (ENA fully on, IN1 equal IN2) and kCoast (all
+  // pins LOW). Called whenever the wanted drive or duty changes. The limit-switch interrupt on the board may stop the
+  // motor sooner than this call does (it makes IN1 equal IN2 itself); this call then confirms it.
+  virtual void drive_z(ZDrive drive, uint8_t duty_percent) = 0;
+  // The RAW level of a limit switch: true = actuated (pressed, or the wire is broken).
+  virtual bool limit_actuated(ZLimit limit) = 0;
 };
 
 // Defined by the unit tests only, to preset the device state (stage 4a has no HOME that could set the homed
@@ -73,7 +80,8 @@ struct CommandProcessorTestPeer;
 
 class CommandProcessor {
  public:
-  CommandProcessor(ResponseSink* sink, HardwareOps* hardware, const MotionConfig& motion = MotionConfig::from_project());
+  CommandProcessor(ResponseSink* sink, HardwareOps* hardware, const MotionConfig& motion = MotionConfig::from_project(),
+                   const ZConfig& z = ZConfig::from_project());
 
   // One framed line (no terminator). ``now_ms`` is the free-running millisecond clock.
   void handle_line(const char* line, uint32_t now_ms);
@@ -88,6 +96,10 @@ class CommandProcessor {
   // WAIT is sent once the queue has drained. The running MOVE stays in the queue until it has finished, so it counts
   // toward the depth (SPEC 5.2).
   void poll_motion();
+
+  // The main loop calls this on every pass: it reads the limit switches, runs the Z logic and reports what happened
+  // (done of a ZUP / ZDOWN, !alarm:Z_TIMEOUT, !alarm:LIMIT_Z, which is also an emergency stop of everything).
+  void poll_z(uint32_t now_ms);
 
   // Put a MOVE in the motion queue together with the ACCEL that is current now. A full queue answers error:3 and
   // returns false (the command is NOT queued); on success it returns true and sends nothing (the caller sends ok).
@@ -124,6 +136,12 @@ class CommandProcessor {
   void do_accel(const Command& command);
   void do_wait();
   void do_pos();
+  void do_z_move(bool toward_top, uint32_t now_ms);
+  void do_zstop();
+  // Give the board the drive and duty the Z logic wants now (only when they changed).
+  void apply_z_drive();
+  // The emergency stop of an alarm that is not the ESTOP command (LIMIT_Z).
+  void emergency_stop_for(protocol::AlarmCode alarm);
   void do_ping(uint32_t now_ms);
   void do_enable(bool enable);
   void do_estop();
@@ -135,6 +153,9 @@ class CommandProcessor {
   DeviceState state_;
   HeartbeatWatchdog watchdog_;
   CommandQueue queue_;
+  ZAxis z_axis_;
+  ZDrive z_applied_drive_;
+  uint8_t z_applied_duty_;
   double accel_deg_s2_;                      // the ACCEL that is current; before the first ACCEL the ceiling
   double commanded_deg_[kJointCount];        // target angle of the MOVE that started last (0 before the first)
   bool move_running_;                        // the oldest queued MOVE is on the joints

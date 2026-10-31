@@ -20,6 +20,20 @@ void test_power_up_state() {
   TEST_ASSERT_TRUE(state.drivers_enabled());  // SPEC 10.2: enabled at boot so the motors hold position
 }
 
+void test_trip_is_an_estop_that_latches_the_given_alarm() {
+  DeviceState state;
+  state.set_homed_z(true);
+  state.set_homed_joints(true);
+  state.trip(protocol_alarm::kLIMIT_Z);
+  TEST_ASSERT_TRUE(state.estop());  // LIMIT_Z stops at once and blocks the motion commands like an ESTOP (SPEC 10.2)
+  TEST_ASSERT_TRUE(state.alarm_latched(protocol_alarm::kLIMIT_Z));
+  TEST_ASSERT_TRUE(!state.alarm_latched(protocol_alarm::kESTOP));
+  TEST_ASSERT_TRUE(!state.homed());
+  TEST_ASSERT_TRUE(state.drivers_enabled());  // the drivers stay enabled
+  state.reset();
+  TEST_ASSERT_TRUE(!state.estop() && !state.any_alarm());
+}
+
 void test_homed_needs_z_and_the_joints() {
   DeviceState state;
   state.set_homed_z(true);
@@ -215,6 +229,7 @@ int main(int, char**) {
   RUN_TEST(test_watchdog_uses_the_configured_timeout);
   RUN_TEST(test_watchdog_expires_strictly_after_the_timeout_and_only_once);
   RUN_TEST(test_a_feed_pushes_the_deadline_and_rearms_after_an_expiry);
+  RUN_TEST(test_trip_is_an_estop_that_latches_the_given_alarm);
   RUN_TEST(test_watchdog_survives_the_millisecond_counter_wrapping);
   return UNITY_END();
 }

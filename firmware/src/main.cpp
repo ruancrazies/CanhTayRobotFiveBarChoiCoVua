@@ -1,8 +1,10 @@
-// Stages 4a and 4b-1 (S1): serial commands and joint motion. docs/SPEC.md sections 4.2, 4.3, 5 and 10.2.
+// Stages 4a and 4b-1 (S1, S2): serial commands, joint motion and the Z axis. docs/SPEC.md sections 4.2, 4.3, 5, 10.2.
 //
-// Handles INFO, PING, ENABLE, DISABLE, ESTOP, RESET (4a) and MOVE, ACCEL, WAIT, POS (S1); every other command parses
-// and answers error:1 until its stage (see lib/chessbot_core/src/command_processor.cpp). The two joints are driven
-// by FastAccelStepper 0.33.14. No Z, servo or ADS1115 code exists yet, so Z cannot move.
+// Handles INFO, PING, ENABLE, DISABLE, ESTOP, RESET (4a), MOVE, ACCEL, WAIT, POS (S1) and ZUP, ZDOWN, ZSTOP (S2); every
+// other command parses and answers error:1 until its stage (see lib/chessbot_core/src/command_processor.cpp). The two
+// joints are driven by FastAccelStepper 0.33.14. Z is a DC motor on an L298: IN1 / IN2 are plain GPIOs and ENA is one
+// LEDC channel (its own timer, not the servo's); the two limit switches are read by an interrupt that stops the motor.
+// No servo or ADS1115 code exists yet.
 //
 // The TB6600 ENA pins are NOT given to the library: FastAccelStepper::setEnablePin() drives the pin to the disabled
 // level when it is called (0.33.14 source), which would release a joint at boot. This file drives ENA itself and only
@@ -57,6 +59,78 @@ void hold_boot_levels() {
   drive_z_motor_pins_idle();
 }
 
+// ---- Z axis: L298 and the limit switches (SPEC 4.3, 10.2) ---------------------------------------------------------------
+
+using chessbot::ZDrive;
+using chessbot::ZLimit;
+
+// What the limit-switch interrupt may stop: the direction the motor is being driven in (kCoast / kBrake: nothing to do).
+volatile ZDrive g_z_drive = ZDrive::kCoast;
+// What the pins were last set to by drive_z_pins(), so a ramp step changes only the duty and never the direction pins.
+ZDrive g_z_pins = ZDrive::kCoast;
+
+// A normally closed switch reads kLimitActuatedLevel when pressed OR when its wire is broken (SPEC 4.3).
+bool IRAM_ATTR limit_pin_actuated(uint8_t pin) {
+  return (digitalRead(pin) == HIGH) == chessbot::config::kLimitActuatedLevel;
+}
+
+// Runs on every edge of either switch. It decides with the same predicate as the core (z_must_stop_now) and, when the
+// motor must stop, makes IN1 equal IN2 at once: the motor is no longer driven. It deliberately writes nothing else: no
+// LEDC call (not safe in an interrupt), no Serial. The next loop() pass reads the same pins, tells the core, and the core
+// leaves ENA fully on, which turns "IN1 equal IN2" into the electric brake.
+void IRAM_ATTR on_limit_switch_edge() {
+  if (chessbot::z_must_stop_now(g_z_drive, limit_pin_actuated(chessbot::pins::kLimitTop), limit_pin_actuated(chessbot::pins::kLimitBottom))) {
+    digitalWrite(chessbot::pins::kL298In1, LOW);
+    digitalWrite(chessbot::pins::kL298In2, LOW);
+  }
+}
+
+// L298 levels. IN1 = raise, IN2 = lower (SPEC 4.2). Braking is ENA fully on with IN1 equal IN2 (both LOW here);
+// coasting is every pin LOW, the boot state. The duty only matters for kRaise and kLower.
+void drive_z_pins(ZDrive drive, uint8_t duty_percent) {
+  const uint8_t channel = chessbot::config::kZMotorLedcChannel;
+  if ((drive == ZDrive::kRaise || drive == ZDrive::kLower) && drive == g_z_pins) {
+    ledcWrite(channel, chessbot::z_duty_to_ticks(duty_percent, chessbot::config::kZMotorPwmResolutionBits));  // a ramp step
+    return;
+  }
+  switch (drive) {
+    case ZDrive::kRaise:
+    case ZDrive::kLower:
+      g_z_drive = ZDrive::kCoast;  // the interrupt has nothing to stop while the direction changes
+      ledcWrite(channel, 0);
+      digitalWrite(chessbot::pins::kL298In1, drive == ZDrive::kRaise ? HIGH : LOW);
+      digitalWrite(chessbot::pins::kL298In2, drive == ZDrive::kLower ? HIGH : LOW);
+      g_z_drive = drive;  // from here a switch edge stops the motor
+      ledcWrite(channel, chessbot::z_duty_to_ticks(duty_percent, chessbot::config::kZMotorPwmResolutionBits));
+      break;
+    case ZDrive::kBrake:
+      g_z_drive = ZDrive::kBrake;
+      digitalWrite(chessbot::pins::kL298In1, LOW);
+      digitalWrite(chessbot::pins::kL298In2, LOW);
+      ledcWrite(channel, chessbot::z_full_scale_ticks(chessbot::config::kZMotorPwmResolutionBits));
+      break;
+    case ZDrive::kCoast:
+      g_z_drive = ZDrive::kCoast;
+      ledcWrite(channel, 0);
+      digitalWrite(chessbot::pins::kL298In1, LOW);
+      digitalWrite(chessbot::pins::kL298In2, LOW);
+      break;
+  }
+  g_z_pins = drive;
+}
+
+// The Z PWM channel (own channel and timer; the servo gets another in a later stage) and the two limit-switch inputs with
+// their interrupts. Called right after the joint steppers are connected; the L298 pins are already LOW (boot levels), and
+// a duty of 0 keeps ENA LOW, so Z cannot move.
+void connect_z_axis() {
+  ledcSetup(chessbot::config::kZMotorLedcChannel, chessbot::config::kZMotorPwmHz, chessbot::config::kZMotorPwmResolutionBits);
+  ledcAttachPin(chessbot::pins::kL298Ena, chessbot::config::kZMotorLedcChannel);
+  pinMode(chessbot::pins::kLimitTop, INPUT);  // input-only pins with an external pull-down: no internal pull exists
+  pinMode(chessbot::pins::kLimitBottom, INPUT);
+  attachInterrupt(digitalPinToInterrupt(chessbot::pins::kLimitTop), on_limit_switch_edge, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(chessbot::pins::kLimitBottom), on_limit_switch_edge, CHANGE);
+}
+
 class SerialSink : public ResponseSink {
  public:
   void write_line(const char* line) override {
@@ -99,13 +173,13 @@ class BoardHardware : public HardwareOps {
 
   // ESTOP / heartbeat timeout: stop every motion output, NEVER the TB6600 ENA pins (SPEC 10.2). The joint pulses stop
   // at once (forceStop: no deceleration ramp; at the assumed speed ceiling that is a few hundred microsteps per
-  // second, far below what the motor can stop from). The Z pins are driven to their idle level again.
+  // second, far below what the motor can stop from). Z is braked electrically (ENA on, IN1 equal IN2).
   void halt_motion_outputs() override {
     force_stop_joints();
-    drive_z_motor_pins_idle();
+    drive_z_pins(ZDrive::kBrake, 0);
   }
 
-  // DISABLE and RESET: stop the joint pulses, leave Z alone.
+  // DISABLE and RESET: stop the joint pulses, leave Z alone (the core brakes Z itself on RESET).
   void stop_joint_pulses() override { force_stop_joints(); }
 
   // One MOVE: each joint that has to run gets its own speed and acceleration (so both arrive together) and its
@@ -136,6 +210,11 @@ class BoardHardware : public HardwareOps {
   }
 
   int32_t joint_steps_issued(uint8_t joint) override { return g_joint[joint] != nullptr ? g_joint[joint]->getCurrentPosition() : 0; }
+
+  void drive_z(ZDrive drive, uint8_t duty_percent) override { drive_z_pins(drive, duty_percent); }
+  bool limit_actuated(ZLimit limit) override {
+    return limit_pin_actuated(limit == ZLimit::kTop ? chessbot::pins::kLimitTop : chessbot::pins::kLimitBottom);
+  }
 };
 
 SerialSink g_sink;
@@ -148,6 +227,7 @@ LineFramer g_framer;
 void setup() {
   hold_boot_levels();  // first, before anything else (SPEC 10.2)
   connect_joint_steppers();
+  connect_z_axis();
   Serial.setRxBufferSize(chessbot::config::kSerialRxBufferBytes);
   Serial.begin(chessbot::config::kBaudRate);
   // No boot banner: every line on the wire must be a protocol response the PC can parse.
@@ -170,6 +250,7 @@ void loop() {
         break;
     }
   }
+  g_processor.poll_z(millis());  // the limit switches, the Z ramp and timeout; a Z move's done or alarm
   g_processor.poll_motion();  // a finished MOVE leaves the queue, the next one starts, a WAIT gets its done
   // The heartbeat watchdog (g_processor.tick(millis())) is still NOT enforced: SPEC 12 puts the heartbeat test after
   // the motors, and the owner scheduled it for stage 4b-5. The state and the rule are in the core and unit tested.

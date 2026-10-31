@@ -67,9 +67,13 @@ class DeviceState {
 
   // ESTOP (command or button): set the flag, latch ESTOP, homing becomes mandatory. The drivers stay
   // enabled (SPEC 10.2). Idempotent.
-  void enter_estop() {
+  void enter_estop() { trip(protocol::AlarmCode::kESTOP); }
+
+  // An alarm that is an emergency stop too (LIMIT_Z: SPEC 10.2 stops at once "if triggered by a hardware button or
+  // LIMIT_Z"): the ESTOP flag is set like for ESTOP, but the alarm that is latched is ``alarm``. The drivers stay enabled.
+  void trip(protocol::AlarmCode alarm) {
     estop_ = true;
-    latch(protocol::AlarmCode::kESTOP);
+    latch(alarm);
     clear_homed();
   }
 

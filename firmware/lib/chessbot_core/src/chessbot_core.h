@@ -8,5 +8,6 @@
 #include "device_state.h"
 #include "line_framer.h"
 #include "response_format.h"
+#include "z_axis.h"
 
 #endif  // CHESSBOT_CORE_H

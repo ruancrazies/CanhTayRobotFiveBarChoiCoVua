@@ -16,7 +16,7 @@ namespace config {
 
 // ---- Identity --------------------------------------------------------------------------------
 // firmware.version: FW= of the INFO reply: one token, no spaces, no '='
-constexpr char kFirmwareVersion[] = "4b1-s1";
+constexpr char kFirmwareVersion[] = "4b1-s2";
 
 // ---- Serial ----------------------------------------------------------------------------------
 // serial.baud: serial baud rate (SPEC 5: suggested 115200); platformio.ini monitor_speed must equal it (a test checks)
@@ -44,6 +44,8 @@ constexpr bool kTb6600EnaLevelEnabled = true;
 constexpr bool kTb6600EnaLevelDisabled = false;
 // electrical.z_axis.motor_pins_boot_level: level of the three L298 pins (ENA, IN1, IN2) at boot, so Z cannot move before a command (SPEC 10.2); only LOW
 constexpr bool kZMotorPinsBootLevel = false;
+// electrical.limit_switches.actuated_level: signal level when the switch is actuated or the wire is broken
+constexpr bool kLimitActuatedLevel = false;
 
 // ---- PWM (SPEC 10.2: LEDC, separate channels and timers) -------------------------------------
 // electrical.z_axis.pwm_frequency_hz: Z motor PWM frequency (about 10 kHz)

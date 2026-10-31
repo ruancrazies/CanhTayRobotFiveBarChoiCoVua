@@ -307,7 +307,7 @@ motion:
 # ---- Firmware identity ---------------------------------------------------------------------------------------------
 firmware:
   # FW= of the INFO reply: one token, no spaces, no '='
-  version: "4b1-s1"
+  version: "4b1-s2"
 
 # ---- PC side: Robot Commander (SPEC 5.3, 6.4); null = no value yet, the Commander then refuses to be built ---------
 commander:

@@ -79,7 +79,7 @@ HERE = Path(__file__).resolve().parent
 # only these are accepted; every other command, ENABLE included, is error:5.
 OWNER_ESTOP_SET = frozenset({"ZSTOP", "DISABLE", "POS", "INFO", "PING", "ESTOP", "RESET"})
 # Commands in OWNER_ESTOP_SET that the stage 4a firmware parses but does not implement (it answers error:1).
-STUBS_IN_THE_FIRMWARE = frozenset({"ZSTOP"})
+STUBS_IN_THE_FIRMWARE: frozenset[str] = frozenset()  # every command that is accepted in an ESTOP exists in the firmware since stage 4b-1 S2
 
 # The order of checks of SPEC 5.2, as error numbers (owner decision 1 of the phase 4a driver rules): unknown command (1),
 # bad parameter (2), ESTOP (5), drivers disabled (6), not homed (4), queue full (3). Typed out here on purpose; the
@@ -250,7 +250,10 @@ def run_firmware(binary: Path, scripts: Sequence[Sequence[str]], *, bench: bool 
 # --------------------------------------------------------------------------- #
 
 
-FINISH = "@finish"  # pseudo-line of the bench scripts: the joints have arrived (see the module docstring)
+FINISH = "@finish"  # pseudo-line of the bench scripts: the joints and Z have arrived (see the module docstring)
+Z_STALL = "@zstall"  # the Z carriage will not reach a switch: the next Z move times out
+BOTH_SWITCHES = "@both"  # both Z limit switches read actuated (LIMIT_Z)
+CLEAR_SWITCHES = "@clear"  # the carriage is back on the top switch alone
 FINISH_ADVANCE_S = 1000.0  # how far the simulator clock jumps for it; far beyond any MOVE of the scripts
 
 
@@ -273,6 +276,12 @@ def run_simulator(scripts: Sequence[Sequence[str]], firmware_version: str, *, be
         for line in script:
             if line == FINISH:
                 now[0] += FINISH_ADVANCE_S
+            elif line == Z_STALL:
+                sim.inject_z_stall()
+            elif line == BOTH_SWITCHES:
+                sim.inject_limit_z()
+            elif line == CLEAR_SWITCHES:
+                pass  # the simulator has no switches: the fault was an event, not a level
             else:
                 pair.pc.write((line + "\n").encode("ascii"))
             sim.pump()
@@ -342,6 +351,8 @@ def check_gate(name: str, firmware: Transcript, simulator: Transcript) -> list[s
             problems.append(f"{name} in an ESTOP on the {side}: answered {replies}, expected {'error:5' if expected_refused else 'anything but error:5'}")
         if "error:5" in replies and not expected_refused:
             problems.append(f"{name} in an ESTOP on the {side} contains error:5: {replies}")
+    if name in OWNER_ESTOP_SET and name not in STUBS_IN_THE_FIRMWARE and "error:1" in firmware[-1].replies:
+        problems.append(f"{name} in an ESTOP on the firmware core answered error:1: it is a stub, but STUBS_IN_THE_FIRMWARE does not list it")
     if name in STUBS_IN_THE_FIRMWARE and list(firmware[-1].replies) != ["error:1"]:
         problems.append(f"{name} is expected to be an error:1 stub in the stage 4a firmware, got {list(firmware[-1].replies)}: update STUBS_IN_THE_FIRMWARE")
     return problems
@@ -383,8 +394,8 @@ def check_driver_gate(prelude_name: str, line: str, firmware: Transcript, simula
 
 BenchScript = tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]  # name, lines, the expected replies of each line
 
-POS_AT_ZERO = ("POS A=0 B=0 NA=0 NB=0", "ok")
-POS_AT_MOVE_LINE = ("POS A=90 B=45 NA=800 NB=400", "ok")  # 90 and 45 degrees at 3200 / 360 steps per degree
+POS_AT_ZERO = ("POS A=0 B=0 NA=0 NB=0 Z=TOP", "ok")
+POS_AT_MOVE_LINE = ("POS A=90 B=45 NA=800 NB=400 Z=TOP", "ok")  # 90 and 45 degrees at 3200 / 360 steps per degree
 BENCH_OK = ("ok",)
 BENCH_OK_DONE = ("ok", "done")
 BENCH_NOTHING: tuple[str, ...] = ()
@@ -414,21 +425,39 @@ def bench_scripts(queue_depth: int) -> list[BenchScript]:
         ("check 2 (beta above its limit)", ("MOVE A=90 B=116 F=20",), (("error:2",),)),
         ("the limits and the ceilings are inclusive",
          ("MOVE A=60 B=-20 F=30", FINISH, "MOVE A=200 B=115 F=20", FINISH, "POS"),
-         (BENCH_OK, BENCH_NOTHING, BENCH_OK, BENCH_NOTHING, ("POS A=200 B=115 NA=1778 NB=1022", "ok"))),
+         (BENCH_OK, BENCH_NOTHING, BENCH_OK, BENCH_NOTHING, ("POS A=200 B=115 NA=1778 NB=1022 Z=TOP", "ok"))),
         ("ACCEL above the ceiling is error:2, at the ceiling ok",
          ("ACCEL S=61", "ACCEL S=60", MOVE_LINE, FINISH, "POS"),
          (("error:2",), BENCH_OK, BENCH_OK, BENCH_NOTHING, POS_AT_MOVE_LINE)),
+        ("ZDOWN is ok, then done at the bottom switch, and POS says BOTTOM",
+         ("ZDOWN", FINISH, "POS"), (BENCH_OK, ("done",), ("POS A=0 B=0 NA=0 NB=0 Z=BOTTOM", "ok"))),
+        ("ZUP at TOP is ok and done at once", ("ZUP",), (BENCH_OK_DONE,)),
+        ("ZDOWN then ZUP: two moves, two dones, back at TOP",
+         ("ZDOWN", FINISH, "ZUP", FINISH, "POS"), (BENCH_OK, ("done",), BENCH_OK, ("done",), POS_AT_ZERO)),
+        ("MOVE needs Z at TOP (error:4 at BOTTOM, ok again at TOP), also with the bench setting",
+         ("ZDOWN", FINISH, MOVE_LINE, "ZUP", FINISH, MOVE_LINE), (BENCH_OK, ("done",), ("error:4",), BENCH_OK, ("done",), BENCH_OK)),
+        ("ZSTOP cancels the done of a Z move", ("ZDOWN", "ZSTOP", FINISH, "ZSTOP"), (BENCH_OK, BENCH_OK, BENCH_NOTHING, BENCH_OK)),
+        ("a Z move that never reaches a switch ends in !alarm:Z_TIMEOUT, and the device still answers",
+         (Z_STALL, "ZDOWN", FINISH, "PING"), (BENCH_NOTHING, BENCH_OK, ("!alarm:Z_TIMEOUT",), BENCH_OK)),
+        ("ESTOP cancels the done of a Z move", ("ZDOWN", "ESTOP", FINISH, "RESET"), (BENCH_OK, ("!alarm:ESTOP",), BENCH_NOTHING, BENCH_OK)),
+        ("in an ESTOP ZUP and ZDOWN are error:5 and ZSTOP is ok", ("ESTOP", "ZUP", "ZDOWN", "ZSTOP"),
+         (("!alarm:ESTOP",), ("error:5",), ("error:5",), BENCH_OK)),
+        ("DISABLE does not cancel the done of a Z move", ("ZDOWN", "DISABLE", FINISH), (BENCH_OK, BENCH_OK, ("done",))),
+        ("a Z move needs no joint driver", ("DISABLE", "ZDOWN", FINISH), (BENCH_OK, BENCH_OK, ("done",))),
+        ("both switches actuated is !alarm:LIMIT_Z and an emergency stop; RESET clears it",
+         (BOTH_SWITCHES, MOVE_LINE, CLEAR_SWITCHES, "RESET", MOVE_LINE),
+         (("!alarm:LIMIT_Z",), ("error:5",), BENCH_NOTHING, BENCH_OK, BENCH_OK)),
         ("a second MOVE starts from where the first arrived",
          (MOVE_LINE, FINISH, "MOVE A=60 B=-20 F=20", FINISH, "POS"),
-         (BENCH_OK, BENCH_NOTHING, BENCH_OK, BENCH_NOTHING, ("POS A=60 B=-20 NA=533 NB=-178", "ok"))),
+         (BENCH_OK, BENCH_NOTHING, BENCH_OK, BENCH_NOTHING, ("POS A=60 B=-20 NA=533 NB=-178 Z=TOP", "ok"))),
     ]
 
 
 def normalise_reply(reply: str) -> str:
-    """POS without the fields the firmware cannot fill yet: SA, SB (the AS5600, stage 4b-4) and Z (the limit switches, 4b-2)."""
+    """POS without the fields the firmware cannot fill yet: SA and SB (the AS5600, stage 4b-4)."""
     if not reply.startswith("POS "):
         return reply
-    return " ".join(token for token in reply.split() if not token.startswith(("SA=", "SB=", "Z=")))
+    return " ".join(token for token in reply.split() if not token.startswith(("SA=", "SB=")))
 
 
 def check_bench(script: BenchScript, firmware: Transcript, simulator: Transcript) -> list[str]:

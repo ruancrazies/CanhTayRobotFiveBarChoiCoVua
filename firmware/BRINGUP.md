@@ -2,8 +2,8 @@
 
 Stage 4a is the serial skeleton: `INFO`, `PING`, `ENABLE`, `DISABLE`, `ESTOP`, `RESET`. Sections 1 to 7 are the stage 4a
 checks (they still hold; the `MOVE` lines in them use values inside the limits). Stage 4b-1 S1 adds joint motion
-(`MOVE`, `ACCEL`, `WAIT`, `POS`): section 8. `HOME` is still a stub: it is understood, passes the gates of
-SPEC 5.2 (`error:5`, `error:6`) and answers `error:1`. Z, the servo and the sensors do not exist yet; the commands for
+(`MOVE`, `ACCEL`, `WAIT`, `POS`): section 8; S2 adds the Z axis (`ZUP`, `ZDOWN`, `ZSTOP`): section 9. `HOME` is still a stub: it is understood, passes the gates of
+SPEC 5.2 (`error:5`, `error:6`) and answers `error:1`. The servo and the sensors do not exist yet; the commands for
 them are understood but answer `error:1`.
 
 Read SPEC section 14 before powering the motors. For this stage: motors disconnected from the arm (or the
@@ -76,7 +76,7 @@ Type each line, press Enter. Replies are exact.
 | Type | Expected reply | Also check |
 | --- | --- | --- |
 | *(nothing, after reset)* | no output | multimeter: D13 and D26 at 3.3 V (drivers enabled, shafts hold); D4, D18, D19 at 0 V |
-| `INFO` | `INFO FW=4b1-s1 PROTO=1` then `ok` | |
+| `INFO` | `INFO FW=4b1-s2 PROTO=1` then `ok` | |
 | `PING` | `ok` | |
 | `DISABLE` | `ok` | D13 and D26 drop to 0 V; shafts turn freely by hand (SPEC 14 step 4) |
 | `ENABLE` | `ok` | D13 and D26 back to 3.3 V; shafts hold |
@@ -99,7 +99,7 @@ Type each line, press Enter. Replies are exact.
 | `ping` | `error:1` | names are case sensitive |
 | `PING x` | `error:2` | unknown parameter |
 | `GRIP S=181` | `error:2` | parameter out of range |
-| `ZUP`, `ZDOWN`, `ZSTOP`, `GRIP S=90` (not in an ESTOP) | `error:1` | stubs: parsed, not implemented yet (`HOME` is in the rows above; `MOVE`, `ACCEL`, `WAIT` and `POS` exist from stage 4b-1 S1, section 8). In an ESTOP only `ZSTOP` still answers `error:1`; `ZUP`, `ZDOWN` and `GRIP` answer `error:5` |
+| `GRIP S=90` (not in an ESTOP) | `error:1` | stub: parsed, not implemented yet (`HOME` is in the rows above; `MOVE`, `ACCEL`, `WAIT`, `POS` exist from S1, section 8, and `ZUP`, `ZDOWN`, `ZSTOP` from S2, section 9). In an ESTOP `ZUP`, `ZDOWN` and `GRIP` answer `error:5`, `ZSTOP` answers `ok` |
 | an empty line | no reply | |
 
 If every row matches, stage 4a is done. If a row does not, paste the lines you typed and the lines you got.
@@ -133,7 +133,7 @@ The core already implements these rules and the host tests prove them, but nothi
 | `ZDOWN` or `ZUP` running, then `DISABLE` | `ok`, `ok`, then `done` (`DISABLE` does not stop Z) | no Z yet |
 | `MOVE` queue full (`kQueueDepth` slow `MOVE`s, then one more) | `error:3`; the extra `MOVE` is not queued | needs the homed flag |
 | `ESTOP`, `RESET`, a heartbeat timeout, or a new `HOME` while a `WAIT` is pending | no `done` for that `WAIT` (same rule as `DISABLE`) | no `WAIT`, no heartbeat in 4a |
-| `MOVE` with Z not at TOP; `HOME AB` with Z not at TOP | `error:4` | the Z state does not exist yet |
+| `MOVE` with Z not at TOP; `HOME AB` with Z not at TOP | `error:4` | checked in S2: section 9 |
 
 ## 6. Not in this stage
 
@@ -156,8 +156,8 @@ The core already implements these rules and the host tests prove them, but nothi
 
 New in this step: `MOVE`, `ACCEL`, `WAIT` and `POS` work, and both joints are driven by FastAccelStepper 0.33.14
 (pinned in `platformio.ini`; `pio run -e esp32dev` is also the first check of that pin). `INFO` now says
-`FW=4b1-s1`. **Not in S1:** `HOME` (still `error:1`), Z, the servo, the AS5600 angles, and the heartbeat: a missing
-`PING` still stops nothing until stage 4b-5.
+`FW=4b1-s2`. **Not in S1:** `HOME` (still `error:1`), the servo, the AS5600 angles, and the heartbeat: a missing
+`PING` still stops nothing until stage 4b-5. (Z, the L298 and the limit switches arrive in S2: section 9.)
 
 **Before you start.** Motors off the arm, or the arm held so nothing can hit anything; TB6600 current low; your hand on
 the 24 V switch. `MOVE` is `error:4` until the arm is homed and `HOME` does not exist yet, so for this bench test only:
@@ -175,12 +175,12 @@ Type each line, press Enter.
 
 | Type | Expected reply | Also check |
 | --- | --- | --- |
-| `INFO` | `INFO FW=4b1-s1 PROTO=1`, `ok` | |
-| `POS` | `POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID`, `ok` | SA, SB are always 0 and Z is always MID in S1 |
+| `INFO` | `INFO FW=4b1-s2 PROTO=1`, `ok` | |
+| `POS` | `POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=TOP`, `ok` | SA, SB are always 0. With the S2 firmware `Z=` follows the limit switches (section 9): hold the TOP switch pressed (or leave the arm at the top) for the rows below, otherwise it reads `Z=MID` and every `MOVE` is `error:4` |
 | `MOVE A=90 B=45 F=20` | `error:6` if you sent `DISABLE` before; otherwise `ok` | with the bench setting `false`: `error:4` |
 | `ENABLE`, then `MOVE A=90 B=45 F=20` | `ok`, `ok` | both shafts turn and **arrive together** (A: 800 steps, B: 400 steps at 8.889/deg); listen for stalls and missed steps |
 | `WAIT` (while it moves) | `ok`, then `done` when the motion has ended | `done` comes after the shafts stop, not before |
-| `POS` (after it arrived) | `POS A=90 B=45 SA=0 SB=0 NA=800 NB=400 Z=MID`, `ok` | NA and NB are the steps issued |
+| `POS` (after it arrived) | `POS A=90 B=45 SA=0 SB=0 NA=800 NB=400 Z=TOP`, `ok` | NA and NB are the steps issued |
 | `MOVE A=60 B=-20 F=20` | `ok` | the way back; `POS` then says `A=60 B=-20 ... NA=533 NB=-178` |
 | `MOVE A=90 B=45 F=31` | `error:2` | above the speed ceiling; nothing moves |
 | `MOVE A=59 B=45 F=20`, `MOVE A=90 B=116 F=20` | `error:2` each | outside the joint soft limits; nothing moves |
@@ -205,3 +205,53 @@ What to report: the lines you typed and the lines you got, the direction each jo
 whether the two joints stopped at the same moment, and any stall, whine or missed step. `POS` after a `MOVE` that
 a stall interrupted still shows the steps that were issued, not where the shaft is.
 
+## 9. Stage 4b-1, S2: the Z axis
+
+New in this step: `ZUP`, `ZDOWN` and `ZSTOP` work, the two limit switches are read (D35 = TOP, D34 = BOTTOM), `POS` reports
+`Z=TOP`, `Z=BOTTOM` or `Z=MID`, and `MOVE` needs Z at TOP (`error:4` otherwise, also with the bench setting). `INFO` says
+`FW=4b1-s2`. **Not in S2:** `HOME` (still `error:1`), the servo, the AS5600, and the heartbeat (a missing `PING` still
+stops nothing until stage 4b-5).
+
+**Before you start (SPEC 14 steps 5 and 6).** First the switches with the motor unplugged, then the motor with the carriage
+free to move and your hand on the L298 supply switch. A Z that falls when power is cut can be damaged: hold it or keep it
+off the mechanism until you trust the direction and the stops. The first motor run should use a **short timeout**: in
+`config/settings.yaml` set `electrical.z_axis.full_travel_ms` to a small value such as `1000` (the timeout is 1.5 times it),
+run `python -m tools.gen_all`, build and flash; put the real measured travel time back afterwards (SPEC 13).
+
+Values in use (all assumed until you confirm them): travel 5000 ms, timeout factor 1.5 (so 7.5 s), PWM 10 kHz, duty 40 % ramping
+to 70 % over 500 ms and dropping to 40 % after 80 % of the travel time, debounce 8 ms. Switches are normally closed: pressed
+or a broken wire reads actuated.
+
+| Do this | Expected | Also check |
+| --- | --- | --- |
+| reset the board, motor unplugged | no output | D4, D18, D19 at 0 V (as in section 4) |
+| `INFO` | `INFO FW=4b1-s2 PROTO=1`, `ok` | |
+| `POS`, no switch pressed | `POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID`, `ok` | Z is MID at boot until a switch says otherwise |
+| press and hold the TOP switch, `POS` | `Z=TOP` | |
+| release the TOP switch with no command | `!alarm:LIMIT_Z` | Z leaving TOP without a command is an emergency stop (the ESTOP flag is set): send `RESET` |
+| press and hold the BOTTOM switch, `POS`, release it | `Z=BOTTOM`, then no alarm after the release | only TOP has the release rule |
+| press both switches | `!alarm:LIMIT_Z` (once, not repeated) | `RESET` and release both |
+| unplug the TOP switch wire, `POS` | `Z=TOP` | a broken wire reads like a pressed switch (fail-safe); plug it back |
+| `MOVE A=90 B=45 F=20` (bench setting on) with Z not at TOP | `error:4` | with Z at TOP it is `ok` |
+| (TOP held) `ZUP` | `ok`, `done` | nothing moves: Z is already at TOP |
+| motor plugged in, TOP held, `ZDOWN`, then release TOP | `ok`; the motor turns, no alarm for the release | **note which way it turns.** IN1 = raise, IN2 = lower: if `ZDOWN` raises, swap the two motor wires at the L298 output |
+| press BOTTOM while it runs | the motor stops at once; `done` about 10 ms later | D4 steady 3.3 V and D18, D19 both 0 V: the electric brake (ENA on, IN1 equal IN2) |
+| `POS` | `Z=BOTTOM` | |
+| `ZUP`, press TOP while it runs | `ok`, the motor stops at once, `done` | the brake holds until the next Z command |
+| `ZDOWN` and press no switch | after 1.5 times `full_travel_ms` the motor stops and `!alarm:Z_TIMEOUT` is sent once; **no** `done` | the motor stays braked. `RESET` |
+| `ZDOWN`, then `ZSTOP` while it runs | `ok`, `ok`; the motor stops; no `done` | and no `LIMIT_Z` when you send it right away |
+| `ZDOWN`, then `ESTOP` while it runs | `ok`, `!alarm:ESTOP`; the motor stops; no `done` | `RESET` afterwards |
+| `ZDOWN`, then `DISABLE` while it runs | `ok`, `ok`; the motor carries on and `done` arrives at the bottom | `DISABLE` never stops Z (SPEC 5.1) |
+| `ZDOWN`, then `ZUP` while it runs | `ok`, `ok`; the motor reverses; one `done` at the top | a new Z command replaces the running one. Avoid on a loaded axis |
+| `DISABLE`, `ZDOWN` | `ok`, `ok` | Z needs no joint driver |
+| `ESTOP`, then `ZUP` | `!alarm:ESTOP`, `error:5` | `ZSTOP` is still `ok` in an ESTOP |
+| press both switches while a Z move runs | the motor stops at once, `!alarm:LIMIT_Z` only (no `done`) | |
+
+**How to stop safely.** `ZSTOP` brakes Z; `ESTOP` brakes Z and stops the joints (the drivers stay enabled); the L298 supply switch
+cuts everything. The brake only holds while the L298 is powered: cutting its supply releases Z. Cutting a switch wire stops the
+motor in the direction of that switch and is read as "arrived" (`done`), which is the intended fail-safe. There is no
+heartbeat in S2: a Z move that is running carries on until a switch or the timeout stops it, even if the PC disappears.
+
+What to report: the lines you typed and the lines you got, which way `ZDOWN` turned the motor, the measured travel time
+(from `ZDOWN` to `done`), whether the stop at a switch felt hard (a jerk) or soft, the voltage on D4, D18, D19 during the
+run and during the stop, and any `LIMIT_Z` or `Z_TIMEOUT` you did not expect.

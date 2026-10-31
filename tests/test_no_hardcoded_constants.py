@@ -111,6 +111,9 @@ ALLOWED_LITERALS: dict[str, dict[Literal, str]] = {
         "10": "decimal base of the number formatter",
         "40": "size of the text buffer of a formatted float (15 digits, sign, dot and decimals), not a protocol limit",
     },
+    "firmware/lib/chessbot_core/src/z_axis.cpp": {
+        "100": "mathematics: a duty and a share of the travel time are percentages",
+    },
     "firmware/lib/chessbot_core/src/motion.cpp": {
         "360.0": "mathematics: degrees in a full turn (steps per degree = steps per revolution / 360)",
     },

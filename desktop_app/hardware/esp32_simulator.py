@@ -731,6 +731,7 @@ class Esp32Simulator:
             if _reached(now, move.deadline):
                 self._z_move = None  # Z stays where it stalled (_z_pos was frozen when the stall began)
                 self._home_job = None
+                self._homed_z = self._homed_joints = False  # after any alarm homing is mandatory (SPEC 5.3)
                 self._latch(AlarmCode.Z_TIMEOUT)
                 self._send(encode_alarm(AlarmCode.Z_TIMEOUT))
             return

@@ -80,8 +80,10 @@ def test_the_gate_check_fails_on_the_old_behaviour() -> None:
     assert wc.check_gate("ENABLE", last("ok"), last("ok"))  # ENABLE accepted in an ESTOP
     assert wc.check_gate("DISABLE", last("ok"), last("ok")) == []
     assert wc.check_gate("DISABLE", last("error:5"), last("error:5"))  # DISABLE refused in an ESTOP
-    assert wc.check_gate("ZSTOP", last("error:1"), last("ok")) == []  # a stub in the firmware until stage 4b-2
-    assert wc.check_gate("ZSTOP", last("ok"), last("ok"))  # the stub list is out of date: say so
+    assert wc.check_gate("ZSTOP", last("ok"), last("ok")) == []  # implemented on both sides since stage 4b-1 S2
+    assert wc.check_gate("ZSTOP", last("error:1"), last("ok"))  # an implemented command that is a stub again: say so
+    assert wc.check_gate("ZUP", last("error:5"), last("error:5")) == []
+    assert wc.check_gate("ZUP", last("ok"), last("ok"))  # ZUP accepted in an ESTOP
 
 
 def test_the_check_order_in_the_tool_is_the_declared_one() -> None:
@@ -216,12 +218,14 @@ def test_the_bench_check_complains_about_a_wrong_reply_and_a_wrong_state() -> No
     def transcript(replies: list[tuple[str, ...]], drivers: bool = True) -> list:
         return [wc.Step(line, reply, drivers, False, False) for line, reply in zip(lines, replies)]
 
-    good = transcript([("ok",), ("ok",), ("done",), ("POS A=90 B=45 SA=0 SB=0 NA=800 NB=400 Z=MID", "ok")])
-    assert wc.check_bench(script, good, good) == []  # SA, SB and Z are not compared
-    old_move = transcript([("error:4",), ("ok",), ("done",), ("POS A=0 B=0 NA=0 NB=0", "ok")])  # a firmware that still needs HOME
+    good = transcript([("ok",), ("ok",), ("done",), ("POS A=90 B=45 SA=0 SB=0 NA=800 NB=400 Z=TOP", "ok")])
+    assert wc.check_bench(script, good, good) == []  # SA and SB are not compared
+    wrong_z = transcript([("ok",), ("ok",), ("done",), ("POS A=90 B=45 SA=0 SB=0 NA=800 NB=400 Z=MID", "ok")])  # Z is compared since S2
+    assert wc.check_bench(script, wrong_z, good)
+    old_move = transcript([("error:4",), ("ok",), ("done",), ("POS A=0 B=0 NA=0 NB=0 Z=TOP", "ok")])  # a firmware that still needs HOME
     assert wc.check_bench(script, old_move, good)
     assert wc.check_bench(script, good, old_move)
-    assert wc.check_bench(script, good, transcript([r for r in [("ok",), ("ok",), ("done",), ("POS A=90 B=45 NA=800 NB=400", "ok")]], drivers=False))
+    assert wc.check_bench(script, good, transcript([r for r in [("ok",), ("ok",), ("done",), ("POS A=90 B=45 NA=800 NB=400 Z=TOP", "ok")]], drivers=False))
     assert len(expected) == len(lines)
 
 

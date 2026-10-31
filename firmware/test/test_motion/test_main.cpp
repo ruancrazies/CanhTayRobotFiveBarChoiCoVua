@@ -91,6 +91,15 @@ struct FakeHardware : chessbot::HardwareOps {
   }
   bool joints_running() override { return running; }
   int32_t joint_steps_issued(uint8_t joint) override { return steps[joint]; }
+  // Z: the carriage sits on the top switch unless a test moves it; every drive_z() call is recorded.
+  bool top_switch = true;
+  bool bottom_switch = false;
+  std::vector<std::string> z_calls;
+  void drive_z(chessbot::ZDrive drive, uint8_t duty_percent) override {
+    static const char* const names[] = {"coast", "raise", "lower", "brake"};
+    z_calls.push_back(std::string(names[static_cast<int>(drive)]) + ":" + std::to_string(duty_percent));
+  }
+  bool limit_actuated(chessbot::ZLimit limit) override { return limit == chessbot::ZLimit::kTop ? top_switch : bottom_switch; }
 
   // The joints arrive.
   void finish() {
@@ -111,7 +120,10 @@ struct Bench {
   CommandProcessor processor;
   uint32_t now = 0;
 
-  explicit Bench(const MotionConfig& config = test_config()) : processor(&sink, &hardware, config) {}
+  explicit Bench(const MotionConfig& config = test_config()) : processor(&sink, &hardware, config) {
+    processor.poll_z(0);  // let the debounce see the top switch: Z reads TOP
+    processor.poll_z(20);
+  }
 
   std::vector<std::string> send(const char* line) {
     sink.lines.clear();
@@ -648,9 +660,9 @@ void test_nothing_starts_after_a_clear_even_if_the_queue_had_more() {
 
 // ---- POS ----------------------------------------------------------------------------------------------------
 
-void test_pos_at_power_up_reports_zero_steps_and_z_mid() {
+void test_pos_at_power_up_reports_zero_steps_and_the_z_state_of_the_switches() {
   Bench bench;
-  expect(bench.send("POS"), {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID", "ok"}, "POS at boot");
+  expect(bench.send("POS"), {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=TOP", "ok"}, "POS at boot");
 }
 
 void test_pos_after_a_move_reports_the_commanded_angles_and_the_steps_issued() {
@@ -659,7 +671,7 @@ void test_pos_after_a_move_reports_the_commanded_angles_and_the_steps_issued() {
   bench.poll();
   bench.hardware.finish();
   bench.poll();
-  expect(bench.send("POS"), {"POS A=135.4 B=44.6 SA=0 SB=0 NA=1204 NB=396 Z=MID", "ok"}, "POS after a move");
+  expect(bench.send("POS"), {"POS A=135.4 B=44.6 SA=0 SB=0 NA=1204 NB=396 Z=TOP", "ok"}, "POS after a move");
 }
 
 void test_pos_while_a_move_runs_follows_the_steps_issued_so_far() {
@@ -667,7 +679,7 @@ void test_pos_while_a_move_runs_follows_the_steps_issued_so_far() {
   bench.send("MOVE A=90 B=0 F=20");
   bench.poll();
   bench.hardware.part_way(0.5, 0, 0);  // 400 of 800 steps: 45 degrees
-  expect(bench.send("POS"), {"POS A=45 B=0 SA=0 SB=0 NA=400 NB=0 Z=MID", "ok"}, "POS half way");
+  expect(bench.send("POS"), {"POS A=45 B=0 SA=0 SB=0 NA=400 NB=0 Z=TOP", "ok"}, "POS half way");
 }
 
 void test_pos_after_a_stop_short_of_the_target_reports_where_the_joints_stopped() {
@@ -676,14 +688,14 @@ void test_pos_after_a_stop_short_of_the_target_reports_where_the_joints_stopped(
   bench.poll();
   bench.hardware.part_way(0.25, 0, 0);  // 200 steps: 22.5 degrees
   bench.send("DISABLE");
-  expect(bench.send("POS"), {"POS A=22.5 B=0 SA=0 SB=0 NA=200 NB=0 Z=MID", "ok"}, "POS after DISABLE");
+  expect(bench.send("POS"), {"POS A=22.5 B=0 SA=0 SB=0 NA=200 NB=0 Z=TOP", "ok"}, "POS after DISABLE");
 }
 
 void test_pos_is_accepted_in_an_estop_and_never_needs_the_drivers_or_homing() {
   Bench bench;
   bench.send("ESTOP");
   bench.send("DISABLE");
-  expect(bench.send("POS"), {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID", "ok"}, "POS in ESTOP, drivers disabled");
+  expect(bench.send("POS"), {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=TOP", "ok"}, "POS in ESTOP, drivers disabled");
 }
 
 void test_a_negative_angle_is_printed_with_its_sign_and_trailing_zeros_are_dropped() {
@@ -693,7 +705,7 @@ void test_a_negative_angle_is_printed_with_its_sign_and_trailing_zeros_are_dropp
   bench.send("MOVE A=-90 B=-20 F=20");
   bench.poll();
   bench.hardware.finish();
-  expect(bench.send("POS"), {"POS A=-90 B=-20 SA=0 SB=0 NA=-800 NB=-178 Z=MID", "ok"}, "negative angles");
+  expect(bench.send("POS"), {"POS A=-90 B=-20 SA=0 SB=0 NA=-800 NB=-178 Z=TOP", "ok"}, "negative angles");
 }
 
 int main(int, char**) {
@@ -745,7 +757,7 @@ int main(int, char**) {
   RUN_TEST(test_a_move_the_board_cannot_start_is_an_estop_and_never_a_finished_move);
   RUN_TEST(test_a_wait_after_the_clear_finds_an_empty_queue);
   RUN_TEST(test_nothing_starts_after_a_clear_even_if_the_queue_had_more);
-  RUN_TEST(test_pos_at_power_up_reports_zero_steps_and_z_mid);
+  RUN_TEST(test_pos_at_power_up_reports_zero_steps_and_the_z_state_of_the_switches);
   RUN_TEST(test_pos_after_a_move_reports_the_commanded_angles_and_the_steps_issued);
   RUN_TEST(test_pos_while_a_move_runs_follows_the_steps_issued_so_far);
   RUN_TEST(test_pos_after_a_stop_short_of_the_target_reports_where_the_joints_stopped);

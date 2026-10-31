@@ -73,7 +73,7 @@ written next to it in the file.
 | `electrical.limit_switches.com_connected_to` | `3V3` |  |  |  | what the COM terminal is wired to |
 | `electrical.limit_switches.external_pulldown_ohm` | `10000` | ohm |  |  | external pull-down resistor on D34 / D35 |
 | `electrical.limit_switches.idle_level` | `HIGH` |  |  |  | signal level when the switch is not actuated |
-| `electrical.limit_switches.actuated_level` | `LOW` |  |  |  | signal level when the switch is actuated or the wire is broken |
+| `electrical.limit_switches.actuated_level` | `LOW` |  |  | `kLimitActuatedLevel` | signal level when the switch is actuated or the wire is broken |
 | `electrical.limit_switches.debounce_min_ms` | `5` | ms |  |  | lowest debounce window the SPEC allows |
 | `electrical.limit_switches.debounce_max_ms` | `10` | ms |  |  | highest debounce window the SPEC allows |
 | `electrical.limit_switches.debounce_ms` | `8` | ms | yes | `kDebounceMs` | debounce window the firmware uses (SPEC 4.3: 5 to 10 ms) |
@@ -151,7 +151,7 @@ written next to it in the file.
 
 | Key | Value | Unit | Assumed | Firmware constant | Description |
 |---|---|---|---|---|---|
-| `firmware.version` | `4b1-s1` |  |  | `kFirmwareVersion` | FW= of the INFO reply: one token, no spaces, no '=' |
+| `firmware.version` | `4b1-s2` |  |  | `kFirmwareVersion` | FW= of the INFO reply: one token, no spaces, no '=' |
 
 ## commander
 

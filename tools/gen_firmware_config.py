@@ -112,6 +112,7 @@ CONFIG: tuple[tuple[str, tuple[Constant, ...]], ...] = (
             Constant("kTb6600EnaLevelEnabled", "bool", "electrical.tb6600.ena_level_driver_enabled", kind="level"),
             Constant("kTb6600EnaLevelDisabled", "bool", "electrical.tb6600.ena_level_driver_disabled", kind="level"),
             Constant("kZMotorPinsBootLevel", "bool", "electrical.z_axis.motor_pins_boot_level", kind="level"),
+            Constant("kLimitActuatedLevel", "bool", "electrical.limit_switches.actuated_level", kind="level"),
         ),
     ),
     (

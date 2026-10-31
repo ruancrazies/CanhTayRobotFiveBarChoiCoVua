@@ -61,6 +61,15 @@ struct FakeHardware : chessbot::HardwareOps {
   bool start_joint_move(const chessbot::JointMove&) override { return true; }
   bool joints_running() override { return false; }
   int32_t joint_steps_issued(uint8_t) override { return 0; }
+  // Z: the carriage sits on the top switch unless a test moves it; every drive_z() call is recorded.
+  bool top_switch = true;
+  bool bottom_switch = false;
+  std::vector<std::string> z_calls;
+  void drive_z(chessbot::ZDrive drive, uint8_t duty_percent) override {
+    static const char* const names[] = {"coast", "raise", "lower", "brake"};
+    z_calls.push_back(std::string(names[static_cast<int>(drive)]) + ":" + std::to_string(duty_percent));
+  }
+  bool limit_actuated(chessbot::ZLimit limit) override { return limit == chessbot::ZLimit::kTop ? top_switch : bottom_switch; }
 };
 
 struct Bench {
@@ -68,7 +77,10 @@ struct Bench {
   FakeHardware hardware;
   CommandProcessor processor;
   uint32_t now = 0;
-  Bench() : processor(&sink, &hardware, gate_test_config()) {}
+  Bench() : processor(&sink, &hardware, gate_test_config()) {
+    processor.poll_z(0);  // let the debounce see the top switch: Z reads TOP
+    processor.poll_z(20);
+  }
 
   // Send one line; return the replies it produced.
   std::vector<std::string> send(const char* line) {
@@ -249,10 +261,9 @@ void test_in_estop_every_command_in_the_set_is_accepted_and_none_is_error_5() {
     } else if (name == "INFO") {
       expect(reply, {info.c_str(), "ok"}, item.line);
     } else if (name == "POS") {
-      expect(reply, {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID", "ok"}, item.line);  // implemented in stage 4b-1 (S1)
+      expect(reply, {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=TOP", "ok"}, item.line);  // implemented in stage 4b-1 (S1)
     } else {
-      // ZSTOP is in the set but is a stub until stage 4b-1 S2: it gets past the ESTOP check and answers error:1.
-      expect(reply, {"error:1"}, item.line);
+      expect(reply, {"ok"}, item.line);  // ZSTOP: implemented in stage 4b-1 S2, accepted in an ESTOP
     }
   }
 }
@@ -356,12 +367,11 @@ void test_in_estop_parse_errors_come_before_error_5() {
   expect(bench.send("MOVE A=1"), {"error:2"}, "bad parameter in ESTOP");
 }
 
-void test_in_estop_the_stubbed_safe_commands_are_still_error_1() {
-  // ZSTOP is allowed in an ESTOP by the PC simulator but is not implemented until S2. (POS is, since S1.)
+void test_in_estop_zstop_and_pos_are_implemented_and_answered() {
   Bench bench;
   bench.send("ESTOP");
-  expect(bench.send("ZSTOP"), {"error:1"}, "ZSTOP in ESTOP");
-  expect(bench.send("POS"), {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID", "ok"}, "POS in ESTOP");
+  expect(bench.send("ZSTOP"), {"ok"}, "ZSTOP in ESTOP");
+  expect(bench.send("POS"), {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=TOP", "ok"}, "POS in ESTOP");
 }
 
 void test_reset_clears_estop_and_makes_homing_mandatory() {
@@ -430,8 +440,8 @@ void test_a_bad_frame_is_error_1() {
 
 void test_every_not_yet_implemented_command_parses_and_answers_error_1() {
   Bench bench;
-  // MOVE, ACCEL, WAIT and POS are real since S1 (test/test_motion). These are still stubs.
-  const char* stubs[] = {"HOME", "HOME Z", "HOME AB", "ZUP", "ZDOWN", "ZSTOP", "GRIP S=90"};
+  // MOVE, ACCEL, WAIT and POS are real since S1 (test/test_motion), ZUP, ZDOWN and ZSTOP since S2 (test/test_zcommands).
+  const char* stubs[] = {"HOME", "HOME Z", "HOME AB", "GRIP S=90"};
   for (const char* line : stubs) {
     expect(bench.send(line), {"error:1"}, line);
   }
@@ -447,7 +457,7 @@ void test_the_stubs_are_exactly_the_commands_that_are_not_yet_implemented() {
   // Guards the report: a command that is neither implemented nor answered error:1 would be a surprise.
   // MOVE is "implemented" for this test: with the drivers enabled and the arm not homed the gates answer error:4,
   // never the error:1 of a stub.
-  const char* implemented[] = {"INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "MOVE", "ACCEL", "WAIT", "POS"};
+  const char* implemented[] = {"INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "MOVE", "ACCEL", "WAIT", "POS", "ZUP", "ZDOWN", "ZSTOP"};
   Bench bench;
   for (uint8_t c = 0; c < protocol::kCommandCount; ++c) {
     const std::string name = protocol::kCommands[c].name;
@@ -767,7 +777,7 @@ int main(int, char**) {
   RUN_TEST(test_disable_in_estop_keeps_homing_mandatory);
   RUN_TEST(test_in_estop_ping_info_and_estop_still_work);
   RUN_TEST(test_in_estop_parse_errors_come_before_error_5);
-  RUN_TEST(test_in_estop_the_stubbed_safe_commands_are_still_error_1);
+  RUN_TEST(test_in_estop_zstop_and_pos_are_implemented_and_answered);
   RUN_TEST(test_reset_clears_estop_and_makes_homing_mandatory);
   RUN_TEST(test_reset_without_an_estop_is_ok);
   RUN_TEST(test_reset_empties_the_queue);

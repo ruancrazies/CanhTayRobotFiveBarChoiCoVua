@@ -346,17 +346,39 @@ def test_the_boot_function_drives_both_tb6600_ena_pins_and_the_three_z_pins() ->
     assert enable and "kTb6600Ena1" in enable.group(1) and "kTb6600Ena2" in enable.group(1)
 
 
-def test_stage_4b1_s1_touches_only_the_joint_stepper_pins() -> None:
-    """Stage 4b-1 S1 drives the joint STEP/DIR pins (through FastAccelStepper) and nothing else of the motion hardware."""
+def test_stage_4b1_s2_touches_only_the_joint_stepper_z_and_limit_pins() -> None:
+    """Stage 4b-1 drives the joint STEP/DIR pins (FastAccelStepper), the L298 / LEDC and the two limit switches; no servo, no I2C."""
     code = _code_only(MAIN_CPP.read_text(encoding="utf-8"))
-    for name in ("kServoPwm", "kI2cSda", "kI2cScl", "kLimitTop", "kLimitBottom"):
+    for name in ("kServoPwm", "kI2cSda", "kI2cScl", "kServoLedcChannel"):
         assert name not in code, name
-    for call in ("ledcSetup", "ledcAttach", "ledcWrite", "Wire.", "attachInterrupt", "analogWrite", "tone("):
+    for call in ("Wire.", "analogWrite", "tone(", "ledcAttach("):  # ledcAttach( is the 3.x API; Arduino-ESP32 2.0.x has ledcAttachPin
         assert call not in code, call
     # The joint driver ENA pins stay under the firmware's own drive_pin(): FastAccelStepper::setEnablePin() would
     # drive them at once and bypass the ENABLE/DISABLE/ESTOP rules.
     assert "setEnablePin" not in code
     assert "setAutoEnable(false)" in code
+
+
+def test_the_z_pwm_uses_the_2_0_x_ledc_api_on_its_own_channel_and_never_the_servo_timer() -> None:
+    code = _code_only(MAIN_CPP.read_text(encoding="utf-8"))
+    assert "ledcSetup(chessbot::config::kZMotorLedcChannel" in code
+    assert "ledcAttachPin(chessbot::pins::kL298Ena, chessbot::config::kZMotorLedcChannel)" in code
+    assert code.count("ledcWrite(") >= 4
+    assert "kServoLedcChannel" not in code
+
+
+def test_the_limit_switch_interrupt_is_in_iram_and_calls_nothing_unsafe() -> None:
+    code = _code_only(MAIN_CPP.read_text(encoding="utf-8"))
+    handler = re.search(r"void\s+IRAM_ATTR\s+on_limit_switch_edge\s*\(\s*\)\s*\{(.*?)\n\}", code, re.S)
+    assert handler, "on_limit_switch_edge must be an IRAM_ATTR function"
+    body = handler.group(1)
+    for forbidden in ("ledc", "Serial", "millis", "new ", "malloc", "std::", "printf", "delay"):
+        assert forbidden not in body, forbidden
+    assert "z_must_stop_now" in body and "kL298In1" in body and "kL298In2" in body
+    attach = re.findall(r"attachInterrupt\(digitalPinToInterrupt\(chessbot::pins::(kLimit\w+)\), on_limit_switch_edge, CHANGE\)", code)
+    assert sorted(attach) == ["kLimitBottom", "kLimitTop"]
+    reader = re.search(r"bool\s+IRAM_ATTR\s+limit_pin_actuated", code)
+    assert reader, "the pin reader the interrupt calls must be IRAM_ATTR too"
 
 
 # --------------------------------------------------------------------------- #
@@ -451,7 +473,7 @@ REQUIRED_ARDUINO_NAMES = {
     "SDA", "SCL", "SS", "TX", "RX", "A0", "T0",
 }
 # main.cpp is the one file allowed to use the Arduino API itself.
-MAIN_MAY_USE = {"HIGH", "LOW", "OUTPUT"}
+MAIN_MAY_USE = {"HIGH", "LOW", "OUTPUT", "INPUT", "CHANGE", "IRAM_ATTR", "digitalPinToInterrupt"}
 
 
 def _stub_names() -> tuple[set[str], set[str]]:

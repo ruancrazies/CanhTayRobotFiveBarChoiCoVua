@@ -35,6 +35,7 @@
 #include <deque>
 #include <functional>
 #include <initializer_list>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -109,6 +110,9 @@
 #define PSTR(s) (s)
 #define NOT_A_PIN -1
 #define NOT_AN_INTERRUPT -1
+// esp_attr.h (pulled in by the real Arduino.h): code placed in internal RAM, so it runs while the flash cache is off.
+#define IRAM_ATTR
+#define digitalPinToInterrupt(p) (((p) < 40) ? (p) : -1)
 
 typedef bool boolean;
 typedef uint8_t byte;
@@ -155,13 +159,39 @@ static const uint8_t LED_BUILTIN = 2;
 namespace host_arduino {
 inline std::vector<std::string>& log() { static std::vector<std::string> events; return events; }
 inline uint32_t& clock_ms() { static uint32_t now = 0; return now; }
+// The level of every pin: what a test sets for an input, and what digitalWrite() last wrote for an output.
+inline std::map<int, int>& pin_levels() { static std::map<int, int> levels; return levels; }
+// The interrupt service routines attachInterrupt() was given, by pin, and the mode each was attached with.
+inline std::map<int, void (*)()>& isr_table() { static std::map<int, void (*)()> table; return table; }
+inline std::map<int, int>& isr_modes() { static std::map<int, int> modes; return modes; }
 }  // namespace host_arduino
 
 inline void digitalWrite(uint8_t pin, uint8_t value) {
+  host_arduino::pin_levels()[pin] = value;
   host_arduino::log().push_back("write " + std::to_string(pin) + " " + std::to_string(value));
 }
+inline int digitalRead(uint8_t pin) {
+  const auto found = host_arduino::pin_levels().find(pin);
+  return found == host_arduino::pin_levels().end() ? LOW : found->second;
+}
 inline void pinMode(uint8_t pin, uint8_t mode) {
-  host_arduino::log().push_back("mode " + std::to_string(pin) + (mode == OUTPUT ? " output" : " other"));
+  host_arduino::log().push_back("mode " + std::to_string(pin) + (mode == OUTPUT ? " output" : mode == INPUT ? " input" : " other"));
+}
+inline void attachInterrupt(uint8_t interrupt, void (*isr)(void), int mode) {
+  host_arduino::isr_table()[interrupt] = isr;
+  host_arduino::isr_modes()[interrupt] = mode;
+  host_arduino::log().push_back("isr " + std::to_string(interrupt) + " " + std::to_string(mode));
+}
+// LEDC, Arduino-ESP32 2.0.x API.
+inline uint32_t ledcSetup(uint8_t channel, uint32_t freq, uint8_t resolution_bits) {
+  host_arduino::log().push_back("ledc.setup " + std::to_string(channel) + " " + std::to_string(freq) + " " + std::to_string(resolution_bits));
+  return freq;
+}
+inline void ledcAttachPin(uint8_t pin, uint8_t channel) {
+  host_arduino::log().push_back("ledc.attach " + std::to_string(pin) + " " + std::to_string(channel));
+}
+inline void ledcWrite(uint8_t channel, uint32_t duty) {
+  host_arduino::log().push_back("ledc.write " + std::to_string(channel) + " " + std::to_string(duty));
 }
 inline uint32_t millis() { return host_arduino::clock_ms(); }
 
