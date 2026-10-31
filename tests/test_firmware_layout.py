@@ -176,9 +176,28 @@ def test_unset_values_are_zero_so_they_cannot_be_used_by_accident(config: dict[s
     """A null in settings.yaml becomes 0 in the header; the stage that needs it must refuse to run until it is set."""
     by_key = _constant_of_each_key()
     nulls = [key for key in by_key if _lookup(settings, key) is None]
-    assert {"electrical.z_axis.full_travel_ms", "motion.max_accel_deg_s2", "motion.max_speed_deg_s", "motion.direction_change_delay_us"} <= set(nulls)
-    for key in nulls:
+    for key in nulls:  # whatever is null in the committed file (nothing is, after stage 4b-1)
         assert _number(config[by_key[key]]) == 0, key
+
+
+def test_a_null_in_settings_yaml_becomes_zero_in_config_h(tmp_path: Path) -> None:
+    """The four values stage 4b-1 filled in are written as 0 again when they are set back to null."""
+    from tools.gen_firmware_config import render_config_h
+
+    data = yaml.safe_load(SETTINGS_YAML.read_text(encoding="utf-8"))
+    data["electrical"]["z_axis"]["full_travel_ms"] = None
+    data["motion"]["max_speed_deg_s"] = None
+    data["motion"]["max_accel_deg_s2"] = None
+    data["motion"]["direction_change_delay_us"] = None
+    for name in data["motion"]["joint_limits"]:
+        data["motion"]["joint_limits"][name] = None
+    path = tmp_path / "settings.yaml"
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    text = render_config_h(path)
+    values = {m.group(1): m.group(2) for m in re.finditer(r"constexpr \w+ (\w+) = ([^;]+);", text)}
+    for name in ("kZFullTravelMs", "kMaxSpeedDegPerS", "kMaxAccelDegPerS2", "kDirectionChangeDelayUs", "kJointAlphaMinDeg", "kJointBetaMaxDeg"):
+        assert _number(values[name]) == 0, name
+    assert values["kJointLimitsConfigured"] == "false"
 
 
 def _lookup(data: dict, dotted: str) -> object:
@@ -327,13 +346,17 @@ def test_the_boot_function_drives_both_tb6600_ena_pins_and_the_three_z_pins() ->
     assert enable and "kTb6600Ena1" in enable.group(1) and "kTb6600Ena2" in enable.group(1)
 
 
-def test_stage_4a_touches_no_motion_pin() -> None:
-    """No stepper, Z PWM, servo, I2C or limit-switch pin is used by main.cpp in stage 4a."""
+def test_stage_4b1_s1_touches_only_the_joint_stepper_pins() -> None:
+    """Stage 4b-1 S1 drives the joint STEP/DIR pins (through FastAccelStepper) and nothing else of the motion hardware."""
     code = _code_only(MAIN_CPP.read_text(encoding="utf-8"))
-    for name in ("kTb6600Dir1", "kTb6600Pul1", "kTb6600Dir2", "kTb6600Pul2", "kServoPwm", "kI2cSda", "kI2cScl", "kLimitTop", "kLimitBottom"):
+    for name in ("kServoPwm", "kI2cSda", "kI2cScl", "kLimitTop", "kLimitBottom"):
         assert name not in code, name
     for call in ("ledcSetup", "ledcAttach", "ledcWrite", "Wire.", "attachInterrupt", "analogWrite", "tone("):
         assert call not in code, call
+    # The joint driver ENA pins stay under the firmware's own drive_pin(): FastAccelStepper::setEnablePin() would
+    # drive them at once and bypass the ENABLE/DISABLE/ESTOP rules.
+    assert "setEnablePin" not in code
+    assert "setAutoEnable(false)" in code
 
 
 # --------------------------------------------------------------------------- #

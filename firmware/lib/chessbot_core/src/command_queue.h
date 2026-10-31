@@ -20,10 +20,14 @@ class CommandQueue {
   bool empty() const { return count_ == 0; }
   bool full() const { return count_ >= config::kQueueDepth; }
 
-  // false when full (nothing is stored).
-  bool push(const Command& command);
-  // false when empty.
-  bool pop(Command* out);
+  // false when full (nothing is stored). ``accel_deg_s2`` travels with the command: a MOVE runs with the ACCEL that was
+  // current when it was queued (SPEC 5.1: "acceleration for following segments").
+  bool push(const Command& command, double accel_deg_s2 = 0);
+  // false when empty. ``accel_deg_s2`` may be null.
+  bool pop(Command* out, double* accel_deg_s2 = nullptr);
+  // The oldest command, left in the queue (the running MOVE stays queued until it has finished, so it still counts toward
+  // the depth). false when empty.
+  bool peek(Command* out, double* accel_deg_s2 = nullptr) const;
   void clear() {
     head_ = 0;
     count_ = 0;
@@ -31,6 +35,7 @@ class CommandQueue {
 
  private:
   Command items_[config::kQueueDepth];
+  double accel_deg_s2_[config::kQueueDepth];
   uint8_t head_;
   uint8_t count_;
 };

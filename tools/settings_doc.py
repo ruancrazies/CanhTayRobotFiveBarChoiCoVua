@@ -21,6 +21,7 @@ OPAQUE_KEYS = frozenset({"options", "default_options"})
 # Unit by key-name suffix, longest suffix first. The key of a value (or, for ``close_deg.P``, the key above it) carries it.
 UNIT_SUFFIXES: tuple[tuple[str, str], ...] = (
     ("_percent_vdd", "% of Vdd"),
+    ("_percent", "%"),
     ("_deg_s2", "deg/s^2"),
     ("_deg_s", "deg/s"),
     ("_deg", "deg"),

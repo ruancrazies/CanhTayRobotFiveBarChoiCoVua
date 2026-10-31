@@ -48,6 +48,7 @@ ALLOWED_LITERALS: dict[str, dict[Literal, str]] = {
         65535: "C type limit: uint16_t",
         4294967295: "C type limit: uint32_t",
         90.0: "mathematics: the singularity margin lives in [0, 90) degrees",
+        100: "mathematics: a percentage cannot exceed 100",
         1000.0: "unit conversion: milliseconds per second",
         360.0: "mathematics: degrees in a full turn",
     },
@@ -108,6 +109,10 @@ ALLOWED_LITERALS: dict[str, dict[Literal, str]] = {
     "firmware/lib/chessbot_core/src/response_format.cpp": {
         "24": "size of the digit buffer for a 64-bit long, not a protocol limit (the line limit is config.h)",
         "10": "decimal base of the number formatter",
+        "40": "size of the text buffer of a formatted float (15 digits, sign, dot and decimals), not a protocol limit",
+    },
+    "firmware/lib/chessbot_core/src/motion.cpp": {
+        "360.0": "mathematics: degrees in a full turn (steps per degree = steps per revolution / 360)",
     },
 }
 

@@ -30,9 +30,16 @@ assumed:
   - serial.queue_depth
   - timeouts.heartbeat_timeout_ms
   - electrical.limit_switches.debounce_ms
+  - electrical.tb6600.joint1_dir_high_counts_up
+  - electrical.tb6600.joint2_dir_high_counts_up
   - electrical.z_axis.full_travel_ms
   - electrical.z_axis.ledc_channel
   - electrical.z_axis.pwm_resolution_bits
+  - electrical.z_axis.duty_start_percent
+  - electrical.z_axis.duty_peak_percent
+  - electrical.z_axis.duty_ramp_ms
+  - electrical.z_axis.duty_eased_percent
+  - electrical.z_axis.ease_after_travel_percent
   - electrical.servo.ledc_channel
   - electrical.servo.pwm_resolution_bits
   - motion.max_speed_deg_s
@@ -147,10 +154,15 @@ electrical:
     ena_level_driver_enabled: HIGH
     # ENA GPIO level that disables the driver (DISABLE pulls the GPIO to it)
     ena_level_driver_disabled: LOW
-    # FastAccelStepper setEnablePin(pin, low_active_enables_stepper)
+    # Documents the ENA polarity (false: HIGH = driver enabled). The firmware drives the ENA pins itself and does not
+    # call FastAccelStepper setEnablePin() (it would disable the driver at boot), so nothing reads this key yet.
     low_active_enables_stepper: false
     # FastAccelStepper setAutoEnable(auto_enable)
     auto_enable: false
+    # joint 1 (alpha): true = DIR GPIO HIGH makes the step count (and the angle) go up; wrong polarity turns the joint the wrong way
+    joint1_dir_high_counts_up: true
+    # joint 2 (beta): true = DIR GPIO HIGH makes the step count (and the angle) go up
+    joint2_dir_high_counts_up: true
   limit_switches:
     # normally closed contact: COM to 3V3, NC to the signal pin (a broken wire reads as actuated)
     contact: NC
@@ -166,8 +178,8 @@ electrical:
     debounce_min_ms: 5
     # highest debounce window the SPEC allows
     debounce_max_ms: 10
-    # debounce window the firmware uses (the low end, so debounce does not delay the stop)
-    debounce_ms: 5
+    # debounce window the firmware uses (SPEC 4.3: 5 to 10 ms)
+    debounce_ms: 8
   ads1115:
     # I2C address (ADDR pin tied to GND = 0x48)
     address: 0x48
@@ -206,11 +218,21 @@ electrical:
     # per-move Z timeout = this factor x the full-travel time
     timeout_factor: 1.5
     # full Z travel time TOP <-> BOTTOM, measured at assembly (SPEC 13); null = not measured yet
-    full_travel_ms: null
+    full_travel_ms: 5000
     # PWM resolution of the Z motor LEDC channel
     pwm_resolution_bits: 8
     # LEDC channel of the Z motor PWM (must use a different timer than the servo: channel c uses timer (c / 2) % 4)
     ledc_channel: 0
+    # Z motor duty at the start of a move, in percent of full PWM; the duty ramps from here to duty_peak_percent
+    duty_start_percent: 40
+    # Z motor duty at the end of the ramp, in percent of full PWM
+    duty_peak_percent: 70
+    # time the duty takes to ramp from duty_start_percent to duty_peak_percent
+    duty_ramp_ms: 500
+    # Z motor duty near the end of the travel (eased, so the carriage meets the limit switch gently), in percent
+    duty_eased_percent: 40
+    # the duty drops to duty_eased_percent once a move has run this share of full_travel_ms, in percent
+    ease_after_travel_percent: 80
     # level of the three L298 pins (ENA, IN1, IN2) at boot, so Z cannot move before a command (SPEC 10.2); only LOW
     motor_pins_boot_level: LOW
   servo:
@@ -256,12 +278,13 @@ timeouts:
 
 # ---- Motion limits and trajectory (SPEC 6 and 10.2) ----------------------------------------------------------------
 motion:
-  # maximum joint speed (SPEC 13); null = not decided
-  max_speed_deg_s: null
-  # maximum joint acceleration (SPEC 13); null = not decided
-  max_accel_deg_s2: null
+  # maximum joint speed (SPEC 13); a MOVE with a larger F is error:2; null = not decided (every MOVE is then error:2)
+  max_speed_deg_s: 30.0
+  # maximum joint acceleration (SPEC 13); an ACCEL with a larger S is error:2; it is also the acceleration used before the
+  # first ACCEL; null = not decided (every MOVE and ACCEL is then error:2)
+  max_accel_deg_s2: 60.0
   # delay after a direction change, because the TB6600 DIR opto is slow (SPEC 10.2); null = not decided
-  direction_change_delay_us: null
+  direction_change_delay_us: 20
   # lost-step threshold, "start at 3 degrees" (SPEC 13)
   step_loss_threshold_deg: 3.0
   # longest segment of a straight-line trajectory (SPEC 6.3: default 2 mm)
@@ -270,29 +293,32 @@ motion:
   singularity_margin_deg: 15.0
   joint_limits:
     # soft limit of joint alpha, low end; null = not known (all four limits are set together or not at all)
-    alpha_min_deg: null
+    alpha_min_deg: 60.0
     # soft limit of joint alpha, high end
-    alpha_max_deg: null
+    alpha_max_deg: 200.0
     # soft limit of joint beta, low end
-    beta_min_deg: null
+    beta_min_deg: -20.0
     # soft limit of joint beta, high end
-    beta_max_deg: null
+    beta_max_deg: 115.0
+  # BENCH ONLY. true lets MOVE run without homing (only the homed part of check 4 of SPEC 5.2 is skipped; the Z-at-TOP part applies from stage 4b-2).
+  # Use it to turn a joint by hand-sized steps before homing exists. false (the default) is the SPEC behaviour.
+  bench_move_without_homing: false
 
 # ---- Firmware identity ---------------------------------------------------------------------------------------------
 firmware:
   # FW= of the INFO reply: one token, no spaces, no '='
-  version: "4a-0.1.0"
+  version: "4b1-s1"
 
 # ---- PC side: Robot Commander (SPEC 5.3, 6.4); null = no value yet, the Commander then refuses to be built ---------
 commander:
   # F of every MOVE
-  move_speed_deg_s: null
+  move_speed_deg_s: 20.0
   # ACCEL S= sent before each chain; null = no ACCEL is sent
-  acceleration_deg_s2: null
+  acceleration_deg_s2: 40.0
   # PING interval (well below timeouts.heartbeat_timeout_ms)
-  ping_interval_ms: null
+  ping_interval_ms: 500
   # the servo gives no feedback: wait this long after a GRIP
-  grip_settle_ms: null
+  grip_settle_ms: 400
   # how far the arm may be from the first point of a chain (the AS5600 is about +/- 1 degree)
   start_tolerance_deg: null
   # how long an ok may take

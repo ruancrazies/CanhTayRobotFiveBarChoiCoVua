@@ -89,6 +89,9 @@ class SimConfig:
     z_timeout_factor: float  # per-move Z timeout = factor x full travel (electrical.z_axis.timeout_factor)
     pulses_per_rev: float  # 200 * f * i (drive section)
     joint_limits_deg: Optional[JointLimits]  # None: no joint limit is modelled (motion.joint_limits)
+    max_speed_deg_s: Optional[float]  # F above it is error:2; None: no ceiling is modelled (motion.max_speed_deg_s)
+    max_accel_deg_s2: Optional[float]  # ACCEL S above it is error:2; None: no ceiling is modelled (motion.max_accel_deg_s2)
+    bench_move_without_homing: bool  # BENCH ONLY: a MOVE needs no homed flag (motion.bench_move_without_homing)
     initial_z: ZState  # simulator.initial_z
     firmware_version: str  # simulator.firmware_version
     poll_s: float  # how often the serving thread wakes to run its timers (simulator.poll_ms)
@@ -164,6 +167,10 @@ class SimConfig:
                 if limits.configured
                 else None
             ),
+            # A ceiling that is null in settings.yaml is not modelled (None); the firmware refuses every MOVE then.
+            max_speed_deg_s=cfg.motion.max_speed_deg_s,
+            max_accel_deg_s2=cfg.motion.max_accel_deg_s2,
+            bench_move_without_homing=cfg.motion.bench_move_without_homing,
             initial_z=ZState(sim.initial_z),
             firmware_version=sim.firmware_version,
             poll_s=to_seconds(sim.poll_ms),
@@ -514,8 +521,16 @@ class Esp32Simulator:
         return command.name == _HOME and self._wants(command)[1]
 
     def _gate_out_of_limits(self, command: Command, _now: float) -> bool:
-        limits = self.config.joint_limits_deg
-        if command.name != _MOVE or limits is None:
+        """Check 2 beyond the decoder (SPEC 5.2): the joint soft limits, the speed and the acceleration ceilings."""
+        config = self.config
+        if command.name == CommandName.ACCEL.value:
+            return config.max_accel_deg_s2 is not None and float(command.params["S"]) > config.max_accel_deg_s2
+        if command.name != _MOVE:
+            return False
+        if config.max_speed_deg_s is not None and float(command.params["F"]) > config.max_speed_deg_s:
+            return True
+        limits = config.joint_limits_deg
+        if limits is None:
             return False
         a, b = float(command.params["A"]), float(command.params["B"])
         return not (limits[0][0] <= a <= limits[0][1] and limits[1][0] <= b <= limits[1][1])
@@ -528,7 +543,8 @@ class Esp32Simulator:
 
     def _gate_not_homed(self, command: Command, now: float) -> bool:
         if command.name == _MOVE:
-            return not self.homed or self._z_state(now) is not ZState.TOP or self._z_move is not None
+            homing_missing = not self.homed and not self.config.bench_move_without_homing  # BENCH ONLY skips this part
+            return homing_missing or self._z_state(now) is not ZState.TOP or self._z_move is not None
         if command.name == _HOME:
             want_z, want_joints = self._wants(command)
             if want_joints and not want_z and self._z_state(now) is not ZState.TOP:

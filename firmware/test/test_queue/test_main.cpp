@@ -99,8 +99,49 @@ void test_clear_empties_the_queue() {
   TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3.0, out.values[0]);
 }
 
+void test_peek_shows_the_oldest_command_and_leaves_it_queued() {
+  CommandQueue queue;
+  queue.push(move_with_a(7), 40.0);
+  queue.push(move_with_a(8), 50.0);
+  Command out;
+  double accel = 0;
+  TEST_ASSERT_TRUE(queue.peek(&out, &accel));
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 7.0, out.values[0]);
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 40.0, accel);
+  TEST_ASSERT_EQUAL_INT(2, queue.size());  // the running MOVE keeps counting toward the depth
+  TEST_ASSERT_TRUE(queue.peek(&out));      // the acceleration is optional
+}
+
+void test_peek_on_an_empty_queue_fails_and_changes_nothing() {
+  CommandQueue queue;
+  Command out(protocol::Cmd::kHOME);
+  double accel = 12.0;
+  TEST_ASSERT_TRUE(!queue.peek(&out, &accel));
+  TEST_ASSERT_TRUE(out.id == protocol::Cmd::kHOME);
+  TEST_ASSERT_DOUBLE_WITHIN(1e-9, 12.0, accel);
+}
+
+void test_each_command_keeps_the_acceleration_it_was_queued_with_across_wrap_around() {
+  CommandQueue queue;
+  Command out;
+  double accel = 0;
+  int next_out = 0;
+  for (int i = 0; i < 3 * chessbot::config::kQueueDepth; ++i) {
+    TEST_ASSERT_TRUE(queue.push(move_with_a(i), 10.0 + i));
+    if (queue.size() >= chessbot::config::kQueueDepth - 1) {  // keep it nearly full so the ring wraps
+      TEST_ASSERT_TRUE(queue.pop(&out, &accel));
+      TEST_ASSERT_DOUBLE_WITHIN(1e-9, next_out, out.values[0]);
+      TEST_ASSERT_DOUBLE_WITHIN(1e-9, 10.0 + next_out, accel);
+      ++next_out;
+    }
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_peek_shows_the_oldest_command_and_leaves_it_queued);
+  RUN_TEST(test_peek_on_an_empty_queue_fails_and_changes_nothing);
+  RUN_TEST(test_each_command_keeps_the_acceleration_it_was_queued_with_across_wrap_around);
   RUN_TEST(test_a_new_queue_is_empty_and_the_capacity_is_the_configured_depth);
   RUN_TEST(test_it_accepts_exactly_the_configured_depth_then_refuses);
   RUN_TEST(test_a_refused_command_is_not_queued);

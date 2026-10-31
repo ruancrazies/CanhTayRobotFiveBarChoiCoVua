@@ -35,6 +35,11 @@ def sim_config(**overrides: Any) -> SimConfig:
         heartbeat_timeout_s=2.0,
         home_joints_s=0.5,
         initial_joint_deg=START_JOINTS,
+        # Soft limits and the speed / acceleration ceilings are checked only by the tests that ask for them
+        # (tests/test_motion_limits.py): these timing tests move far outside the assumed limits of settings.yaml.
+        joint_limits_deg=None,
+        max_speed_deg_s=None,
+        max_accel_deg_s2=None,
     )
     values.update(overrides)
     return SimConfig.from_settings(**values)

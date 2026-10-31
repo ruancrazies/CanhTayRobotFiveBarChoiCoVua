@@ -132,9 +132,24 @@ CONFIG: tuple[tuple[str, tuple[Constant, ...]], ...] = (
         (
             Constant("kZTimeoutFactor", "float", "electrical.z_axis.timeout_factor"),
             Constant("kZFullTravelMs", "uint32_t", "electrical.z_axis.full_travel_ms", when_null=0),
+            Constant("kZDutyStartPercent", "uint8_t", "electrical.z_axis.duty_start_percent"),
+            Constant("kZDutyPeakPercent", "uint8_t", "electrical.z_axis.duty_peak_percent"),
+            Constant("kZDutyRampMs", "uint16_t", "electrical.z_axis.duty_ramp_ms"),
+            Constant("kZDutyEasedPercent", "uint8_t", "electrical.z_axis.duty_eased_percent"),
+            Constant("kZEaseAfterTravelPercent", "uint8_t", "electrical.z_axis.ease_after_travel_percent"),
         ),
     ),
     ("Inputs", (Constant("kDebounceMs", "uint8_t", "electrical.limit_switches.debounce_ms"),)),
+    (
+        "Joint drive (SPEC 4.1: steps = 200 * f * i * angle / 360) and DIR polarity (true = DIR HIGH counts up)",
+        (
+            Constant("kFullStepsPerRev", "uint16_t", "drive.full_steps_per_rev"),
+            Constant("kMicrostepping", "uint16_t", "drive.microstepping"),
+            Constant("kGearRatio", "float", "drive.gear_ratio"),
+            Constant("kJoint1DirHighCountsUp", "bool", "electrical.tb6600.joint1_dir_high_counts_up"),
+            Constant("kJoint2DirHighCountsUp", "bool", "electrical.tb6600.joint2_dir_high_counts_up"),
+        ),
+    ),
     (
         "Motion limits (0 = not decided)",
         (
@@ -146,6 +161,7 @@ CONFIG: tuple[tuple[str, tuple[Constant, ...]], ...] = (
             Constant("kJointAlphaMaxDeg", "float", "motion.joint_limits.alpha_max_deg", when_null=0),
             Constant("kJointBetaMinDeg", "float", "motion.joint_limits.beta_min_deg", when_null=0),
             Constant("kJointBetaMaxDeg", "float", "motion.joint_limits.beta_max_deg", when_null=0),
+            Constant("kBenchMoveWithoutHoming", "bool", "motion.bench_move_without_homing"),
         ),
     ),
     (
@@ -186,6 +202,8 @@ def _render_value(constant: Constant, value: Any) -> str:
         return f"0x{int(value):02X}"
     if constant.ctype == "float":
         return _float_literal(value)
+    if constant.ctype == "bool":
+        return "true" if value else "false"
     number = int(value)
     limit = _TYPE_LIMITS.get(constant.ctype)
     if limit is not None and not 0 <= number <= limit:

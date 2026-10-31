@@ -16,24 +16,31 @@ Scripts:
   the ESTOP and ENABLE / DISABLE state machine, and the order of checks 5, 6, 4 for a MOVE);
 * the BRINGUP.md session of stage 4a;
 * the ESTOP gate for ALL 15 commands: a fresh ESTOP, then the command;
-* the DRIVER GATES: MOVE and every form of HOME (and two bad lines) after each of several preludes (fresh,
+* the DRIVER GATES: MOVE and every form of HOME (and the bad lines, among them a MOVE or an ACCEL that is above a
+  joint limit or a speed / acceleration ceiling: check 2, answered before ESTOP) after each of several preludes (fresh,
   DISABLE, ESTOP, ESTOP + DISABLE, DISABLE + ENABLE). The reply must be the one the model derives from the fixed
   order of checks (SPEC 5.2: 1, 2, 5, 6, 4, 3) on the firmware core AND on the simulator; and HOME never changes
   the drivers (it never enables them).
 
 The model's order is typed out here (OWNER_CHECK_ORDER) and compared with the declared CHECK_ORDER by a test.
 
-Known stage 4a differences, asserted explicitly instead of ignored:
-* A HOME or MOVE that passes every gate: the stage 4a firmware answers error:1 (the stub, nothing queued), the
+* the BENCH scripts (stage 4b-1): the firmware core and the simulator both with motion.bench_move_without_homing
+  on, so a MOVE is accepted without HOME. They cover MOVE / WAIT / POS, the queue-full answer, the done of a WAIT and
+  its cancellation by DISABLE and ESTOP, and the order of checks 2, 5, 6, 3. The motion is faked: the firmware side
+  finishes the joints on the pseudo-line ``@finish``, the simulator side advances its clock by that line. Each
+  script has a typed-out expected transcript (the third witness for these scripts); the SA, SB and Z fields of POS
+  are not compared (no AS5600 and no limit switch exists in the firmware before stages 4b-4 and 4b-2).
+
+Known differences, asserted explicitly instead of ignored:
+* A HOME that passes every gate: the firmware answers error:1 (the stub, nothing queued; HOME is stage 4b-3), the
   simulator really runs it (``ok``). The driver-gate scripts require exactly that pair of replies, so a HOME that is
-  refused by mistake, or one that sneaks past a gate, is a failure. error:3 (queue full) and the homed flag cannot
-  be reached on the firmware's wire before stage 4b (HOME and MOVE are stubs), so for them the model is used only
-  in the unit tests (tests/test_wire_compat.py, firmware/test/test_processor).
-* ZSTOP and POS are accepted in an ESTOP but are stubs in the firmware (error:1) until a later stage, while the
-  simulator implements them. For them the gate check requires "not error:5" on both sides, and error:1 from
-  the firmware. When a stage implements them, update STUBS_IN_THE_FIRMWARE below.
-* The homed flag is never set in stage 4a (HOME is a stub), so "DISABLE clears the homed flag" is not visible
-  on the firmware's wire yet. It is unit tested in firmware/test (test_state, test_processor) and in
+  refused by mistake, or one that sneaks past a gate, is a failure. Without the bench setting a MOVE is always
+  ``error:4`` on both sides (the homed flag cannot be set before HOME exists).
+* ZSTOP is accepted in an ESTOP but is a stub in the firmware (error:1) until stage 4b-2, while the simulator
+  implements it. For it the gate check requires "not error:5" on both sides, and error:1 from the firmware.
+  When a stage implements it, update STUBS_IN_THE_FIRMWARE below.
+* The homed flag is never set on the firmware's wire (HOME is a stub), so "DISABLE clears the homed flag" is not
+  visible there yet. It is unit tested in firmware/test (test_state, test_processor) and in
   tests/test_esp32_simulator.py.
 
 Usage:  python3 firmware/tools/wire_compat/wire_compat.py [--cxx g++] [--max-length 4] [--firmware-dir DIR]
@@ -51,7 +58,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -72,20 +79,25 @@ HERE = Path(__file__).resolve().parent
 # only these are accepted; every other command, ENABLE included, is error:5.
 OWNER_ESTOP_SET = frozenset({"ZSTOP", "DISABLE", "POS", "INFO", "PING", "ESTOP", "RESET"})
 # Commands in OWNER_ESTOP_SET that the stage 4a firmware parses but does not implement (it answers error:1).
-STUBS_IN_THE_FIRMWARE = frozenset({"ZSTOP", "POS"})
+STUBS_IN_THE_FIRMWARE = frozenset({"ZSTOP"})
 
 # The order of checks of SPEC 5.2, as error numbers (owner decision 1 of the phase 4a driver rules): unknown command (1),
 # bad parameter (2), ESTOP (5), drivers disabled (6), not homed (4), queue full (3). Typed out here on purpose; the
 # model below applies it by hand, and tests/test_wire_compat.py compares it with CHECK_ORDER.
 OWNER_CHECK_ORDER = (1, 2, 5, 6, 4, 3)
 
+# A MOVE that is inside the soft limits (settings.yaml motion.joint_limits: alpha 60..200, beta -20..115) and not
+# above the speed ceiling (30 deg/s). 90 and 45 degrees are 800 and 400 whole steps (3200 steps per turn).
+MOVE_LINE = "MOVE A=90 B=45 F=20"
+# Lines of check 2 beyond the decoder (SPEC 5.2): well-formed, but outside what the robot allows.
+OUT_OF_RANGE_LINES = ("MOVE A=1 B=45 F=20", "MOVE A=90 B=45 F=31", "MOVE A=90 B=116 F=20", "ACCEL S=61")
 # Well-formed lines of the commands the model only gates (MOVE and every form of HOME).
-GATED_LINES = frozenset({"MOVE A=1 B=2 F=3", "HOME", "HOME Z", "HOME AB", "HOME Z AB"})
+GATED_LINES = frozenset({MOVE_LINE, "HOME", "HOME Z", "HOME AB", "HOME Z AB"})
 # Lines that are valid for the parser and that the model answers only through the gates.
 VALID_OTHER_LINES = GATED_LINES
 
 # The lines the exhaustive scripts are built from. "FOO" is an unknown command, "PING x" a bad parameter.
-ALPHABET = ("INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "MOVE A=1 B=2 F=3", "FOO", "PING x", "")
+ALPHABET = ("INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", MOVE_LINE, "FOO", "PING x", "")
 
 # The driver-gate scripts: a prelude, then one line. Every prelude is a list of lines of the shared subset.
 GATE_PRELUDES: dict[str, tuple[str, ...]] = {
@@ -95,10 +107,10 @@ GATE_PRELUDES: dict[str, tuple[str, ...]] = {
     "estop+disabled": ("ESTOP", "DISABLE"),
     "disabled, enabled again": ("DISABLE", "ENABLE"),
 }
-GATE_LINES = (*sorted(GATED_LINES), "MOVE A=1", "HOME x")
+GATE_LINES = (*sorted(GATED_LINES), "MOVE A=1", "HOME x", *OUT_OF_RANGE_LINES)
 
 BRINGUP_SESSION = (
-    "INFO", "PING", "ENABLE", "DISABLE", "ENABLE", "ESTOP", "MOVE A=1 B=2 F=3", "ENABLE", "DISABLE", "ESTOP",
+    "INFO", "PING", "ENABLE", "DISABLE", "ENABLE", "ESTOP", MOVE_LINE, "ENABLE", "DISABLE", "ESTOP",
     "PING", "INFO", "RESET", "ENABLE", "FOO", "ping", "PING x", "GRIP S=181", "",
 )
 
@@ -203,18 +215,22 @@ def build_replay(cxx: str, firmware_dir: Path, out_dir: Path) -> Path:
     return binary
 
 
-def run_firmware(binary: Path, scripts: Sequence[Sequence[str]]) -> tuple[str, list[Transcript]]:
-    """Run every script on a fresh device of the C++ core; returns the firmware version and one transcript each."""
-    text = "\n#NEW\n".join("\n".join(script) for script in scripts) + "\n"
+def run_firmware(binary: Path, scripts: Sequence[Sequence[str]], *, bench: bool = False) -> tuple[str, list[Transcript]]:
+    """Run every script on a fresh device of the C++ core; returns the firmware version and one transcript each.
+
+    ``bench``: motion.bench_move_without_homing is on. The pseudo-line ``@finish`` lets the (faked) joints arrive.
+    """
+    separator = "\n#NEW bench\n" if bench else "\n#NEW\n"
+    text = ("#NEW bench\n" if bench else "") + separator.join("\n".join(script) for script in scripts) + "\n"
     result = subprocess.run([str(binary)], input=text, capture_output=True, text=True, check=True)
     lines = result.stdout.split("\n")
     assert lines[0].startswith("FW "), lines[:2]
     version = lines[0][3:]
-    transcripts: list[Transcript] = [[]]
+    transcripts: list[Transcript] = [] if bench else [[]]
     pending_line: Optional[str] = None
     replies: list[str] = []
     for out in lines[1:]:
-        if out == "#NEW":
+        if out.startswith("#NEW"):
             transcripts.append([])
         elif out.startswith("> "):
             pending_line, replies = out[2:], []
@@ -234,22 +250,31 @@ def run_firmware(binary: Path, scripts: Sequence[Sequence[str]]) -> tuple[str, l
 # --------------------------------------------------------------------------- #
 
 
-def run_simulator(scripts: Sequence[Sequence[str]], firmware_version: str) -> list[Transcript]:
+FINISH = "@finish"  # pseudo-line of the bench scripts: the joints have arrived (see the module docstring)
+FINISH_ADVANCE_S = 1000.0  # how far the simulator clock jumps for it; far beyond any MOVE of the scripts
+
+
+def run_simulator(scripts: Sequence[Sequence[str]], firmware_version: str, *, bench: bool = False) -> list[Transcript]:
     # The committed settings.yaml only (no local overlay, no environment), like the generated headers.
     settings = load_settings(overlay=False)
     # Test values for settings the shared subset never uses (nothing moves in these scripts).
+    # The queue length is the firmware's (serial.queue_depth); the bench flag is the only difference of the two modes.
     config = SimConfig.from_settings(
-        settings, queue_capacity=4, z_travel_s=1.0, heartbeat_timeout_s=2.0, home_joints_s=0.5,
-        initial_joint_deg=(0.0, 0.0), firmware_version=firmware_version,
+        settings, z_travel_s=1.0, heartbeat_timeout_s=2.0, home_joints_s=0.5, initial_joint_deg=(0.0, 0.0),
+        firmware_version=firmware_version, bench_move_without_homing=bench,
     )
     transcripts: list[Transcript] = []
     for script in scripts:
-        sim, pair = make_loopback_simulator(config, clock=lambda: 0.0)
+        now = [0.0]
+        sim, pair = make_loopback_simulator(config, clock=lambda: now[0])
         pair.pc.open()
         sim.open_link()
         steps: Transcript = []
         for line in script:
-            pair.pc.write((line + "\n").encode("ascii"))
+            if line == FINISH:
+                now[0] += FINISH_ADVANCE_S
+            else:
+                pair.pc.write((line + "\n").encode("ascii"))
             sim.pump()
             try:
                 raw = pair.pc.read(0.0)
@@ -267,7 +292,9 @@ def run_simulator(scripts: Sequence[Sequence[str]], firmware_version: str) -> li
 
 
 def line_for(name: str) -> str:
-    """A valid line for ``name``: every required parameter given the value 1."""
+    """A valid line for ``name``: every required parameter given the value 1 (a MOVE: MOVE_LINE, 1 is outside the limits)."""
+    if name == "MOVE":
+        return MOVE_LINE
     return " ".join([name, *(f"{p.name}=1" for p in COMMANDS[name].params if p.required)])
 
 
@@ -350,15 +377,86 @@ def check_driver_gate(prelude_name: str, line: str, firmware: Transcript, simula
     return problems
 
 
+# --------------------------------------------------------------------------- #
+# The bench scripts (motion.bench_move_without_homing on, on both sides)
+# --------------------------------------------------------------------------- #
+
+BenchScript = tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]  # name, lines, the expected replies of each line
+
+POS_AT_ZERO = ("POS A=0 B=0 NA=0 NB=0", "ok")
+POS_AT_MOVE_LINE = ("POS A=90 B=45 NA=800 NB=400", "ok")  # 90 and 45 degrees at 3200 / 360 steps per degree
+BENCH_OK = ("ok",)
+BENCH_OK_DONE = ("ok", "done")
+BENCH_NOTHING: tuple[str, ...] = ()
+
+
+def bench_scripts(queue_depth: int) -> list[BenchScript]:
+    """The bench scripts with what the owner's rules say each line answers (typed out, not derived from either side)."""
+    other_move = "MOVE A=100 B=45 F=20"
+    flood = tuple(MOVE_LINE if index % 2 == 0 else other_move for index in range(queue_depth))
+    return [
+        ("a MOVE needs no HOME, WAIT answers done when the joints arrive, POS then reports the target",
+         (MOVE_LINE, "WAIT", FINISH, "POS"), (BENCH_OK, BENCH_OK, ("done",), POS_AT_MOVE_LINE)),
+        ("POS at power-up", ("POS",), (POS_AT_ZERO,)),
+        ("a full queue answers error:3, and the queue drains when the joints arrive",
+         (*flood, MOVE_LINE, FINISH, "WAIT"), (*([BENCH_OK] * queue_depth), ("error:3",), BENCH_NOTHING, BENCH_OK_DONE)),
+        ("DISABLE cancels the done of a pending WAIT and stops the joints where they are",
+         (MOVE_LINE, "WAIT", "DISABLE", FINISH, "WAIT", "POS"),
+         (BENCH_OK, BENCH_OK, BENCH_OK, BENCH_NOTHING, BENCH_OK_DONE, POS_AT_ZERO)),
+        ("ESTOP cancels the done of a pending WAIT and stops the joints",
+         (MOVE_LINE, "WAIT", "ESTOP", FINISH, "RESET", "WAIT", "POS"),
+         (BENCH_OK, BENCH_OK, ("!alarm:ESTOP",), BENCH_NOTHING, BENCH_OK, BENCH_OK_DONE, POS_AT_ZERO)),
+        ("drivers disabled: a MOVE is error:6", ("DISABLE", MOVE_LINE), (BENCH_OK, ("error:6",))),
+        ("ESTOP: a MOVE is error:5", ("ESTOP", MOVE_LINE), (("!alarm:ESTOP",), ("error:5",))),
+        ("ESTOP and DISABLE: error:5 comes before error:6", ("ESTOP", "DISABLE", MOVE_LINE), (("!alarm:ESTOP",), BENCH_OK, ("error:5",))),
+        ("check 2 (outside a joint limit) comes before error:5", ("ESTOP", "MOVE A=1 B=45 F=20"), (("!alarm:ESTOP",), ("error:2",))),
+        ("check 2 (above the speed ceiling) comes before error:6", ("DISABLE", "MOVE A=90 B=45 F=31"), (BENCH_OK, ("error:2",))),
+        ("check 2 (beta above its limit)", ("MOVE A=90 B=116 F=20",), (("error:2",),)),
+        ("the limits and the ceilings are inclusive",
+         ("MOVE A=60 B=-20 F=30", FINISH, "MOVE A=200 B=115 F=20", FINISH, "POS"),
+         (BENCH_OK, BENCH_NOTHING, BENCH_OK, BENCH_NOTHING, ("POS A=200 B=115 NA=1778 NB=1022", "ok"))),
+        ("ACCEL above the ceiling is error:2, at the ceiling ok",
+         ("ACCEL S=61", "ACCEL S=60", MOVE_LINE, FINISH, "POS"),
+         (("error:2",), BENCH_OK, BENCH_OK, BENCH_NOTHING, POS_AT_MOVE_LINE)),
+        ("a second MOVE starts from where the first arrived",
+         (MOVE_LINE, FINISH, "MOVE A=60 B=-20 F=20", FINISH, "POS"),
+         (BENCH_OK, BENCH_NOTHING, BENCH_OK, BENCH_NOTHING, ("POS A=60 B=-20 NA=533 NB=-178", "ok"))),
+    ]
+
+
+def normalise_reply(reply: str) -> str:
+    """POS without the fields the firmware cannot fill yet: SA, SB (the AS5600, stage 4b-4) and Z (the limit switches, 4b-2)."""
+    if not reply.startswith("POS "):
+        return reply
+    return " ".join(token for token in reply.split() if not token.startswith(("SA=", "SB=", "Z=")))
+
+
+def check_bench(script: BenchScript, firmware: Transcript, simulator: Transcript) -> list[str]:
+    """Problems of one bench script: each side against the typed-out replies, and both sides' state against each other."""
+    name, lines, expected = script
+    problems: list[str] = []
+    for side, steps in (("firmware core", firmware), ("simulator", simulator)):
+        for index, (line, want) in enumerate(zip(lines, expected)):
+            got = tuple(normalise_reply(reply) for reply in steps[index].replies)
+            if got != want:
+                problems.append(f"bench '{name}', line {index + 1} {line!r} on the {side}: answered {list(got)}, expected {list(want)}")
+    for index, (fw, sim) in enumerate(zip(firmware, simulator)):
+        if (fw.drivers, fw.estop, fw.homed) != (sim.drivers, sim.estop, sim.homed):
+            problems.append(f"bench '{name}', line {index + 1} {fw.line!r}: state firmware drivers/estop/homed {(fw.drivers, fw.estop, fw.homed)} != simulator {(sim.drivers, sim.estop, sim.homed)}")
+    return problems
+
+
 @dataclass
 class Report:
     scripts: int
     mismatches: list[str]
     gate_problems: list[str]
+    bench_problems: list[str] = field(default_factory=list)
+    bench_scripts: int = 0
 
     @property
     def ok(self) -> bool:
-        return not self.mismatches and not self.gate_problems
+        return not self.mismatches and not self.gate_problems and not self.bench_problems
 
 
 def run(cxx: str, firmware_dir: Path, max_length: int) -> Report:
@@ -382,7 +480,16 @@ def run(cxx: str, firmware_dir: Path, max_length: int) -> Report:
                 gate_problems.append(f"{name} in an ESTOP: firmware core {list(firmware[index][-1].replies)} != simulator {list(simulator[index][-1].replies)}")
     for (prelude_name, line), index in driver_gate.items():
         gate_problems.extend(check_driver_gate(prelude_name, line, firmware[index], simulator[index]))
-    return Report(len(scripts), mismatches, gate_problems)
+
+    bench = bench_scripts(load_settings(overlay=False).serial.queue_depth)
+    with tempfile.TemporaryDirectory() as tmp:
+        binary = build_replay(cxx, firmware_dir, Path(tmp))
+        _, bench_firmware = run_firmware(binary, [lines for _, lines, _ in bench], bench=True)
+    bench_simulator = run_simulator([lines for _, lines, _ in bench], version, bench=True)
+    bench_problems: list[str] = []
+    for script, fw_steps, sim_steps in zip(bench, bench_firmware, bench_simulator):
+        bench_problems.extend(check_bench(script, fw_steps, sim_steps))
+    return Report(len(scripts), mismatches, gate_problems, bench_problems, len(bench))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -404,10 +511,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stdout.write(f"... and {len(report.mismatches) - 5} more mismatching scripts\n")
     for problem in report.gate_problems:
         sys.stdout.write(f"GATE: {problem}\n")
+    for problem in report.bench_problems:
+        sys.stdout.write(f"BENCH: {problem}\n")
     if report.ok:
-        sys.stdout.write(f"WIRE COMPAT OK: {report.scripts} scripts, C++ core == simulator == model; ESTOP gate checked for all {len(COMMAND_ORDER)} commands; driver gates checked ({len(GATE_PRELUDES)} preludes x {len(GATE_LINES)} lines)\n")
+        sys.stdout.write(f"WIRE COMPAT OK: {report.scripts} scripts, C++ core == simulator == model; ESTOP gate checked for all {len(COMMAND_ORDER)} commands; driver gates checked ({len(GATE_PRELUDES)} preludes x {len(GATE_LINES)} lines); {report.bench_scripts} bench scripts (MOVE without HOME)\n")
         return 0
-    sys.stdout.write(f"WIRE COMPAT FAILED: {len(report.mismatches)} mismatching scripts, {len(report.gate_problems)} gate problems\n")
+    sys.stdout.write(f"WIRE COMPAT FAILED: {len(report.mismatches)} mismatching scripts, {len(report.gate_problems)} gate problems, {len(report.bench_problems)} bench problems\n")
     return 1
 
 

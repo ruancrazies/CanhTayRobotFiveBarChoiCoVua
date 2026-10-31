@@ -1,6 +1,9 @@
 // CommandProcessor with a fake sink and fake hardware: every reply of stage 4a, SPEC 10.2 boot / ESTOP
 // behaviour, the stubbed commands, the heartbeat step, the queue-full error, and the driver rules of the phase 4a
 // follow-up (error:6, the order of checks of SPEC 5.2, what DISABLE does to the queue).
+//
+// Stage 4b-1 made MOVE, ACCEL, WAIT and POS real; their behaviour is tested in test/test_motion. The Bench below uses
+// a motion configuration WITHOUT soft limits, so the tiny angles of these gate tests (A=1 B=2) are in range.
 #include <string>
 #include <unity.h>
 #include <vector>
@@ -30,6 +33,14 @@ struct FakeSink : chessbot::ResponseSink {
   void write_line(const char* line) override { lines.push_back(line); }
 };
 
+// The project's motion settings, but with no soft limit: these tests are about the gates, not about the limits.
+chessbot::MotionConfig gate_test_config() {
+  chessbot::MotionConfig config = chessbot::MotionConfig::from_project();
+  config.limits_configured = false;
+  config.bench_move_without_homing = false;
+  return config;
+}
+
 struct FakeHardware : chessbot::HardwareOps {
   std::vector<bool> driver_calls;  // every set_drivers_enabled(...) argument, in order
   std::vector<std::string> events;  // every hardware call, in order: "pulses", "halt", "drivers=0", "drivers=1"
@@ -47,6 +58,9 @@ struct FakeHardware : chessbot::HardwareOps {
     ++joint_stops;
     events.push_back("pulses");
   }
+  bool start_joint_move(const chessbot::JointMove&) override { return true; }
+  bool joints_running() override { return false; }
+  int32_t joint_steps_issued(uint8_t) override { return 0; }
 };
 
 struct Bench {
@@ -54,7 +68,7 @@ struct Bench {
   FakeHardware hardware;
   CommandProcessor processor;
   uint32_t now = 0;
-  Bench() : processor(&sink, &hardware) {}
+  Bench() : processor(&sink, &hardware, gate_test_config()) {}
 
   // Send one line; return the replies it produced.
   std::vector<std::string> send(const char* line) {
@@ -234,8 +248,10 @@ void test_in_estop_every_command_in_the_set_is_accepted_and_none_is_error_5() {
       expect(reply, {"!alarm:ESTOP"}, item.line);
     } else if (name == "INFO") {
       expect(reply, {info.c_str(), "ok"}, item.line);
+    } else if (name == "POS") {
+      expect(reply, {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID", "ok"}, item.line);  // implemented in stage 4b-1 (S1)
     } else {
-      // ZSTOP and POS are in the set but are stubs in stage 4a: they get past the ESTOP check and answer error:1.
+      // ZSTOP is in the set but is a stub until stage 4b-1 S2: it gets past the ESTOP check and answers error:1.
       expect(reply, {"error:1"}, item.line);
     }
   }
@@ -341,11 +357,11 @@ void test_in_estop_parse_errors_come_before_error_5() {
 }
 
 void test_in_estop_the_stubbed_safe_commands_are_still_error_1() {
-  // ZSTOP and POS are allowed in an ESTOP by the PC simulator but are not implemented until a later stage.
+  // ZSTOP is allowed in an ESTOP by the PC simulator but is not implemented until S2. (POS is, since S1.)
   Bench bench;
   bench.send("ESTOP");
   expect(bench.send("ZSTOP"), {"error:1"}, "ZSTOP in ESTOP");
-  expect(bench.send("POS"), {"error:1"}, "POS in ESTOP");
+  expect(bench.send("POS"), {"POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID", "ok"}, "POS in ESTOP");
 }
 
 void test_reset_clears_estop_and_makes_homing_mandatory() {
@@ -414,8 +430,8 @@ void test_a_bad_frame_is_error_1() {
 
 void test_every_not_yet_implemented_command_parses_and_answers_error_1() {
   Bench bench;
-  // MOVE is not in this list: it goes through the gates first (error:4 here, see the driver-rule tests below).
-  const char* stubs[] = {"HOME", "HOME Z", "HOME AB", "ZUP", "ZDOWN", "ZSTOP", "ACCEL S=1", "GRIP S=90", "WAIT", "POS"};
+  // MOVE, ACCEL, WAIT and POS are real since S1 (test/test_motion). These are still stubs.
+  const char* stubs[] = {"HOME", "HOME Z", "HOME AB", "ZUP", "ZDOWN", "ZSTOP", "GRIP S=90"};
   for (const char* line : stubs) {
     expect(bench.send(line), {"error:1"}, line);
   }
@@ -427,11 +443,11 @@ void test_every_not_yet_implemented_command_parses_and_answers_error_1() {
   TEST_ASSERT_TRUE(!bench.processor.watchdog().armed());
 }
 
-void test_the_stubs_are_exactly_the_commands_that_are_not_stage_4a() {
-  // Guards the report: a command that is neither stage 4a nor answered error:1 would be a surprise.
+void test_the_stubs_are_exactly_the_commands_that_are_not_yet_implemented() {
+  // Guards the report: a command that is neither implemented nor answered error:1 would be a surprise.
   // MOVE is "implemented" for this test: with the drivers enabled and the arm not homed the gates answer error:4,
-  // never the error:1 of a stub. It is queued only from stage 4b.
-  const char* implemented[] = {"INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "MOVE"};
+  // never the error:1 of a stub.
+  const char* implemented[] = {"INFO", "PING", "ENABLE", "DISABLE", "ESTOP", "RESET", "MOVE", "ACCEL", "WAIT", "POS"};
   Bench bench;
   for (uint8_t c = 0; c < protocol::kCommandCount; ++c) {
     const std::string name = protocol::kCommands[c].name;
@@ -484,12 +500,12 @@ void test_move_with_the_drivers_enabled_and_not_homed_is_error_4() {
   expect(bench.send("MOVE A=1 B=2 F=3"), {"error:4"}, "MOVE not homed");
 }
 
-void test_move_on_a_homed_arm_with_room_passes_the_gates_and_is_the_stub() {
+void test_move_on_a_homed_arm_with_room_passes_the_gates_and_is_queued() {
   Bench bench;
   peer_state(bench).set_homed_z(true);
   peer_state(bench).set_homed_joints(true);
-  expect(bench.send("MOVE A=1 B=2 F=3"), {"error:1"}, "MOVE homed, room");  // queued from stage 4b on
-  TEST_ASSERT_TRUE(bench.processor.queue().empty());
+  expect(bench.send("MOVE A=1 B=2 F=3"), {"ok"}, "MOVE homed, room");
+  TEST_ASSERT_EQUAL_INT(1, bench.processor.queue().size());
 }
 
 void test_move_with_a_full_queue_is_error_3_and_not_queued() {
@@ -590,7 +606,7 @@ void test_every_combination_of_estop_drivers_homed_and_queue_matches_the_oracle(
       const std::string text = line;
       const bool is_move = text == "MOVE A=1 B=2 F=3";
       const bool needs_drivers = is_move || text == "HOME" || text == "HOME AB" || text == "HOME Z AB";
-      const char* want = "error:1";  // the stub of 4a: passed every gate
+      const char* want = is_move ? "ok" : "error:1";  // passed every gate: a MOVE is queued (S1), HOME is still a stub
       if (estop) {
         want = "error:5";
       } else if (needs_drivers && !drivers) {
@@ -761,7 +777,7 @@ int main(int, char**) {
   RUN_TEST(test_blank_lines_get_no_reply);
   RUN_TEST(test_a_bad_frame_is_error_1);
   RUN_TEST(test_every_not_yet_implemented_command_parses_and_answers_error_1);
-  RUN_TEST(test_the_stubs_are_exactly_the_commands_that_are_not_stage_4a);
+  RUN_TEST(test_the_stubs_are_exactly_the_commands_that_are_not_yet_implemented);
   RUN_TEST(test_no_heartbeat_alarm_before_the_first_ping);
   RUN_TEST(test_heartbeat_timeout_stops_motion_keeps_the_drivers_and_sends_the_alarm_once);
   RUN_TEST(test_a_ping_after_a_heartbeat_timeout_rearms_the_watchdog);
@@ -769,7 +785,7 @@ int main(int, char**) {
   RUN_TEST(test_a_full_queue_answers_error_3_and_does_not_queue);
   RUN_TEST(test_move_with_the_drivers_disabled_is_error_6_and_not_queued);
   RUN_TEST(test_move_with_the_drivers_enabled_and_not_homed_is_error_4);
-  RUN_TEST(test_move_on_a_homed_arm_with_room_passes_the_gates_and_is_the_stub);
+  RUN_TEST(test_move_on_a_homed_arm_with_room_passes_the_gates_and_is_queued);
   RUN_TEST(test_move_with_a_full_queue_is_error_3_and_not_queued);
   RUN_TEST(test_a_home_that_moves_the_joints_is_error_6_while_the_drivers_are_disabled);
   RUN_TEST(test_home_z_is_not_gated_by_the_drivers_and_never_enables_them);

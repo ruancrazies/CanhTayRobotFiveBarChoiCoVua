@@ -16,7 +16,7 @@ namespace config {
 
 // ---- Identity --------------------------------------------------------------------------------
 // firmware.version: FW= of the INFO reply: one token, no spaces, no '='
-constexpr char kFirmwareVersion[] = "4a-0.1.0";
+constexpr char kFirmwareVersion[] = "4b1-s1";
 
 // ---- Serial ----------------------------------------------------------------------------------
 // serial.baud: serial baud rate (SPEC 5: suggested 115200); platformio.ini monitor_speed must equal it (a test checks)
@@ -72,48 +72,71 @@ constexpr uint16_t kServoPulseMaxUs = 2500;
 constexpr float kZTimeoutFactor = 1.5f;
 // electrical.z_axis.full_travel_ms: full Z travel time TOP <-> BOTTOM, measured at assembly (SPEC 13); null = not measured yet
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr uint32_t kZFullTravelMs = 0;
+constexpr uint32_t kZFullTravelMs = 5000;
+// electrical.z_axis.duty_start_percent: Z motor duty at the start of a move, in percent of full PWM; the duty ramps from here to duty_peak_percent
+// ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
+constexpr uint8_t kZDutyStartPercent = 40;
+// electrical.z_axis.duty_peak_percent: Z motor duty at the end of the ramp, in percent of full PWM
+// ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
+constexpr uint8_t kZDutyPeakPercent = 70;
+// electrical.z_axis.duty_ramp_ms: time the duty takes to ramp from duty_start_percent to duty_peak_percent
+// ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
+constexpr uint16_t kZDutyRampMs = 500;
+// electrical.z_axis.duty_eased_percent: Z motor duty near the end of the travel (eased, so the carriage meets the limit switch gently), in percent
+// ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
+constexpr uint8_t kZDutyEasedPercent = 40;
+// electrical.z_axis.ease_after_travel_percent: the duty drops to duty_eased_percent once a move has run this share of full_travel_ms, in percent
+// ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
+constexpr uint8_t kZEaseAfterTravelPercent = 80;
 
 // ---- Inputs ----------------------------------------------------------------------------------
-// electrical.limit_switches.debounce_ms: debounce window the firmware uses (the low end, so debounce does not delay the stop)
+// electrical.limit_switches.debounce_ms: debounce window the firmware uses (SPEC 4.3: 5 to 10 ms)
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-constexpr uint8_t kDebounceMs = 5;
+constexpr uint8_t kDebounceMs = 8;
+
+// ---- Joint drive (SPEC 4.1: steps = 200 * f * i * angle / 360) and DIR polarity (true = DIR HIGH counts up) ---
+// drive.full_steps_per_rev: NEMA 17 style 1.8 degree stepper: the "200" in 200 * f * i
+constexpr uint16_t kFullStepsPerRev = 200;
+// drive.microstepping: f: TB6600 microstepping (SW1 OFF, SW2 OFF, SW3 ON)
+constexpr uint16_t kMicrostepping = 16;
+// drive.gear_ratio: i: gear ratio motor to driving link; confirmed 1:1 direct drive
+constexpr float kGearRatio = 1.0f;
+// electrical.tb6600.joint1_dir_high_counts_up: joint 1 (alpha): true = DIR GPIO HIGH makes the step count (and the angle) go up; wrong polarity turns the joint the wrong way
+// ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
+constexpr bool kJoint1DirHighCountsUp = true;
+// electrical.tb6600.joint2_dir_high_counts_up: joint 2 (beta): true = DIR GPIO HIGH makes the step count (and the angle) go up
+// ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
+constexpr bool kJoint2DirHighCountsUp = true;
 
 // ---- Motion limits (0 = not decided) ---------------------------------------------------------
-// motion.max_accel_deg_s2: maximum joint acceleration (SPEC 13); null = not decided
+// motion.max_accel_deg_s2: maximum joint acceleration (SPEC 13); an ACCEL with a larger S is error:2; it is also the acceleration used before the first ACCEL; null = not decided (every MOVE and ACCEL is then error:2)
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr float kMaxAccelDegPerS2 = 0.0f;
-// motion.max_speed_deg_s: maximum joint speed (SPEC 13); null = not decided
+constexpr float kMaxAccelDegPerS2 = 60.0f;
+// motion.max_speed_deg_s: maximum joint speed (SPEC 13); a MOVE with a larger F is error:2; null = not decided (every MOVE is then error:2)
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr float kMaxSpeedDegPerS = 0.0f;
+constexpr float kMaxSpeedDegPerS = 30.0f;
 // motion.direction_change_delay_us: delay after a direction change, because the TB6600 DIR opto is slow (SPEC 10.2); null = not decided
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr uint16_t kDirectionChangeDelayUs = 0;
+constexpr uint16_t kDirectionChangeDelayUs = 20;
 // motion.step_loss_threshold_deg: lost-step threshold, "start at 3 degrees" (SPEC 13)
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
 constexpr float kStepLossThresholdDeg = 3.0f;
 // motion.joint_limits.alpha_min_deg: soft limit of joint alpha, low end; null = not known (all four limits are set together or not at all)
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr float kJointAlphaMinDeg = 0.0f;
+constexpr float kJointAlphaMinDeg = 60.0f;
 // motion.joint_limits.alpha_max_deg: soft limit of joint alpha, high end
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr float kJointAlphaMaxDeg = 0.0f;
+constexpr float kJointAlphaMaxDeg = 200.0f;
 // motion.joint_limits.beta_min_deg: soft limit of joint beta, low end
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr float kJointBetaMinDeg = 0.0f;
+constexpr float kJointBetaMinDeg = -20.0f;
 // motion.joint_limits.beta_max_deg: soft limit of joint beta, high end
 // ASSUMED: not confirmed on the real hardware (listed in `assumed` of settings.yaml).
-// null in settings.yaml: no value yet, so the constant is 0.
-constexpr float kJointBetaMaxDeg = 0.0f;
+constexpr float kJointBetaMaxDeg = 115.0f;
 // true when all four joint limits are set; false means no joint limit is known.
-constexpr bool kJointLimitsConfigured = false;
+constexpr bool kJointLimitsConfigured = true;
+// motion.bench_move_without_homing: BENCH ONLY. true lets MOVE run without homing (only the homed part of check 4 of SPEC 5.2 is skipped; the Z-at-TOP part applies from stage 4b-2). Use it to turn a joint by hand-sized steps before homing exists. false (the default) is the SPEC behaviour.
+constexpr bool kBenchMoveWithoutHoming = false;
 
 // ---- Sensors. SENSOR_FAULT when r = V_OUT / V_A2 is below the first or above the second (SPEC 4.3). ---
 // electrical.as5600.r_fault_low: r below this value raises !alarm:SENSOR_FAULT

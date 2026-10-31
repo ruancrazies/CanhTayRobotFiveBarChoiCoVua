@@ -1,9 +1,10 @@
 # Firmware bring-up, stage 4a
 
-Stage 4a is the serial skeleton: `INFO`, `PING`, `ENABLE`, `DISABLE`, `ESTOP`, `RESET`. No stepper, Z, servo
-or ADS1115 code exists yet. `HOME` and `MOVE` are still stubs: they are understood and pass through the gates of
-SPEC 5.2 (`error:5`, `error:6`, `error:4`, `error:3`), and a `HOME` that passes them answers `error:1`. Every other
-command is understood but answers `error:1`.
+Stage 4a is the serial skeleton: `INFO`, `PING`, `ENABLE`, `DISABLE`, `ESTOP`, `RESET`. Sections 1 to 7 are the stage 4a
+checks (they still hold; the `MOVE` lines in them use values inside the limits). Stage 4b-1 S1 adds joint motion
+(`MOVE`, `ACCEL`, `WAIT`, `POS`): section 8. `HOME` is still a stub: it is understood, passes the gates of
+SPEC 5.2 (`error:5`, `error:6`) and answers `error:1`. Z, the servo and the sensors do not exist yet; the commands for
+them are understood but answer `error:1`.
 
 Read SPEC section 14 before powering the motors. For this stage: motors disconnected from the arm (or the
 arm in a safe position), TB6600 current set low, 24 V fused, your hand near the power switch.
@@ -75,30 +76,30 @@ Type each line, press Enter. Replies are exact.
 | Type | Expected reply | Also check |
 | --- | --- | --- |
 | *(nothing, after reset)* | no output | multimeter: D13 and D26 at 3.3 V (drivers enabled, shafts hold); D4, D18, D19 at 0 V |
-| `INFO` | `INFO FW=4a-0.1.0 PROTO=1` then `ok` | |
+| `INFO` | `INFO FW=4b1-s1 PROTO=1` then `ok` | |
 | `PING` | `ok` | |
 | `DISABLE` | `ok` | D13 and D26 drop to 0 V; shafts turn freely by hand (SPEC 14 step 4) |
 | `ENABLE` | `ok` | D13 and D26 back to 3.3 V; shafts hold |
 | `ESTOP` | `!alarm:ESTOP` (no `ok`) | D13 and D26 do **not** change: drivers stay enabled |
-| `ENABLE` and `MOVE A=1 B=2 F=3` while in ESTOP | `error:5` each | D13 and D26 do not change; `ENABLE` is refused until `RESET` |
+| `ENABLE` and `MOVE A=90 B=45 F=20` while in ESTOP | `error:5` each | D13 and D26 do not change; `ENABLE` is refused until `RESET` |
 | `DISABLE` while in ESTOP | `ok` | D13 and D26 drop to 0 V: `DISABLE` is accepted in an ESTOP (SPEC 5.1); the ESTOP flag stays set |
 | `ENABLE` again while still in ESTOP | `error:5` | D13 and D26 stay at 0 V |
 | `ESTOP` again while in ESTOP | `!alarm:ESTOP` (no `ok`) | accepted and harmless: same reply, nothing else changes |
 | `PING`, `INFO` while in ESTOP | `ok`, `INFO ...` + `ok` | still answered in an ESTOP (so are `POS` and `ZSTOP`, stubs in 4a: see the last table row) |
 | `RESET` | `ok` | ESTOP cleared; the drivers stay as they were (still disabled after the `DISABLE` above) |
 | `ENABLE` after `RESET` | `ok` | D13 and D26 back to 3.3 V |
-| `MOVE A=1 B=2 F=3` (drivers enabled, no ESTOP) | `error:4` | not homed; the arm cannot be homed in 4a, so this is the only answer a `MOVE` can get here (never `error:1`) |
+| `MOVE A=90 B=45 F=20` (drivers enabled, no ESTOP) | `error:4` | not homed; the arm cannot be homed in 4a, so this is the only answer a `MOVE` can get here (never `error:1`) |
 | `HOME`, `HOME Z`, `HOME AB` (drivers enabled) | `error:1` | stub: the line passed every gate and nothing runs |
-| `DISABLE`, then `MOVE A=1 B=2 F=3` | `ok`, then `error:6` | D13 and D26 at 0 V and they stay there: a refusal never touches a pin. `error:6` (drivers disabled) comes **before** `error:4` |
+| `DISABLE`, then `MOVE A=90 B=45 F=20` | `ok`, then `error:6` | D13 and D26 at 0 V and they stay there: a refusal never touches a pin. `error:6` (drivers disabled) comes **before** `error:4` |
 | (drivers disabled) `HOME`, `HOME AB`, `HOME Z AB` | `error:6` each | a `HOME` that moves the joints needs the drivers. `HOME` never enables them, so D13 and D26 stay at 0 V |
 | (drivers disabled) `HOME Z` | `error:1` | **not** `error:6`: a Z-only `HOME` needs no joint driver (it is the stub in 4a) |
 | (drivers disabled) `MOVE A=1`, `FOO` | `error:2`, `error:1` | parse errors come before `error:6` |
-| `ESTOP`, then `MOVE A=1 B=2 F=3`, `HOME`, `HOME Z` (drivers disabled or not) | `!alarm:ESTOP`, then `error:5` each | `error:5` comes before `error:6`; send `RESET` and `ENABLE` afterwards |
+| `ESTOP`, then `MOVE A=90 B=45 F=20`, `HOME`, `HOME Z` (drivers disabled or not) | `!alarm:ESTOP`, then `error:5` each | `error:5` comes before `error:6`; send `RESET` and `ENABLE` afterwards |
 | `FOO` | `error:1` | unknown command |
 | `ping` | `error:1` | names are case sensitive |
 | `PING x` | `error:2` | unknown parameter |
 | `GRIP S=181` | `error:2` | parameter out of range |
-| `POS`, `ZUP`, `ZDOWN`, `ZSTOP`, `ACCEL S=1`, `GRIP S=90`, `WAIT` (not in an ESTOP) | `error:1` | stubs: parsed, not implemented in 4a (`HOME` is in the rows above). In an ESTOP only `POS` and `ZSTOP` still answer `error:1`; `ZUP`, `ZDOWN`, `ACCEL`, `GRIP` and `WAIT` answer `error:5` |
+| `ZUP`, `ZDOWN`, `ZSTOP`, `GRIP S=90` (not in an ESTOP) | `error:1` | stubs: parsed, not implemented yet (`HOME` is in the rows above; `MOVE`, `ACCEL`, `WAIT` and `POS` exist from stage 4b-1 S1, section 8). In an ESTOP only `ZSTOP` still answers `error:1`; `ZUP`, `ZDOWN` and `GRIP` answer `error:5` |
 | an empty line | no reply | |
 
 If every row matches, stage 4a is done. If a row does not, paste the lines you typed and the lines you got.
@@ -150,3 +151,57 @@ The core already implements these rules and the host tests prove them, but nothi
 | No reply to anything | line ending is not LF (`monitor_eol = LF`), or wrong port |
 | `error:1` for every line | a tab or non-ASCII character in the line; the protocol is printable ASCII only |
 | Boot lines at the start | normal: ESP32 boot ROM, before the firmware |
+
+## 8. Stage 4b-1, S1: joint motion
+
+New in this step: `MOVE`, `ACCEL`, `WAIT` and `POS` work, and both joints are driven by FastAccelStepper 0.33.14
+(pinned in `platformio.ini`; `pio run -e esp32dev` is also the first check of that pin). `INFO` now says
+`FW=4b1-s1`. **Not in S1:** `HOME` (still `error:1`), Z, the servo, the AS5600 angles, and the heartbeat: a missing
+`PING` still stops nothing until stage 4b-5.
+
+**Before you start.** Motors off the arm, or the arm held so nothing can hit anything; TB6600 current low; your hand on
+the 24 V switch. `MOVE` is `error:4` until the arm is homed and `HOME` does not exist yet, so for this bench test only:
+in `config/settings.yaml` set `motion.bench_move_without_homing: true`, run `python -m tools.gen_all`, build and
+flash. **Set it back to `false` afterwards.** Step counting starts at 0 at power-up, and 0 is angle 0: the soft
+limits (alpha 60 to 200, beta -20 to 115) are checked on the angle you type, not on where the arm really is, so on
+the bench a `MOVE` can drive a joint into its mechanical stop. Start with small distances.
+
+Limits used below (all `config/settings.yaml`, all assumed until you confirm them): speed at most 30 deg/s,
+acceleration at most 60 deg/s^2, 3200 steps per revolution of the motor (16 microsteps), gear ratio 1, so
+8.889 steps per degree. DIR polarity is assumed: `electrical.tb6600.joint1_dir_high_counts_up` and
+`joint2_dir_high_counts_up` are `true` (DIR HIGH = angle up).
+
+Type each line, press Enter.
+
+| Type | Expected reply | Also check |
+| --- | --- | --- |
+| `INFO` | `INFO FW=4b1-s1 PROTO=1`, `ok` | |
+| `POS` | `POS A=0 B=0 SA=0 SB=0 NA=0 NB=0 Z=MID`, `ok` | SA, SB are always 0 and Z is always MID in S1 |
+| `MOVE A=90 B=45 F=20` | `error:6` if you sent `DISABLE` before; otherwise `ok` | with the bench setting `false`: `error:4` |
+| `ENABLE`, then `MOVE A=90 B=45 F=20` | `ok`, `ok` | both shafts turn and **arrive together** (A: 800 steps, B: 400 steps at 8.889/deg); listen for stalls and missed steps |
+| `WAIT` (while it moves) | `ok`, then `done` when the motion has ended | `done` comes after the shafts stop, not before |
+| `POS` (after it arrived) | `POS A=90 B=45 SA=0 SB=0 NA=800 NB=400 Z=MID`, `ok` | NA and NB are the steps issued |
+| `MOVE A=60 B=-20 F=20` | `ok` | the way back; `POS` then says `A=60 B=-20 ... NA=533 NB=-178` |
+| `MOVE A=90 B=45 F=31` | `error:2` | above the speed ceiling; nothing moves |
+| `MOVE A=59 B=45 F=20`, `MOVE A=90 B=116 F=20` | `error:2` each | outside the joint soft limits; nothing moves |
+| `ACCEL S=61` then `ACCEL S=30` | `error:2`, `ok` | a slower `MOVE` after `ACCEL S=30` should ramp up and down more gently |
+| `MOVE A=1` | `error:2` | missing parameter |
+| nine `MOVE`s in a row with `F=1` (alternate `A=90` and `A=100`; queue depth 8, the running one counts) | `ok` for the first 8, `error:3` for the 9th | the 9th is not queued; finish with `ESTOP`, `RESET` |
+| `MOVE A=200 B=100 F=2`, then `DISABLE` | `ok`, `ok` | **the shafts stop at once**, D13 and D26 drop to 0 V, the rest of the queue never runs |
+| `MOVE ...` (slow), `WAIT`, then `DISABLE` while `WAIT` is pending | `ok`, `ok`, `ok`, and then **no `done`** | the `WAIT` is cancelled with the queue |
+| `ENABLE`, `MOVE ...` (slow), then `ESTOP` | `ok`, `ok`, `!alarm:ESTOP` (no `ok`) | the shafts stop at once (a hard stop, no deceleration in S1); D13 and D26 stay at 3.3 V |
+| `MOVE ...` while in ESTOP | `error:5` | until `RESET` |
+| `RESET`, `MOVE ...` (slow), then `RESET` while it moves | `ok`, `ok`, `ok` | the shafts stop; no `done` for a `WAIT` that was pending |
+| `MOVE A=90 B=45 F=20` when the joints are already there | `ok` | nothing moves, `WAIT` answers `ok`, `done` at once |
+
+**How to stop safely.** Any time: `ESTOP` (the shafts stop, the drivers stay enabled so the joints hold), or
+`DISABLE` (the shafts stop and are released: an arm that is not held will fall), or the 24 V switch. There is no
+heartbeat in S1, so the firmware will carry on with a queued `MOVE` if the PC disappears: keep `F` small and your
+hand on the switch. If a joint turns the wrong way, send `ESTOP`, then swap the matching
+`joint1_dir_high_counts_up` / `joint2_dir_high_counts_up` value in `config/settings.yaml`, run `python -m tools.gen_all`
+and flash again.
+
+What to report: the lines you typed and the lines you got, the direction each joint turned for a positive angle,
+whether the two joints stopped at the same moment, and any stall, whine or missed step. `POS` after a `MOVE` that
+a stall interrupted still shows the steps that were issued, not where the shaft is.
+

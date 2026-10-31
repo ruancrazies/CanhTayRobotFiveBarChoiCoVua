@@ -13,7 +13,7 @@ written next to it in the file.
 - Per-machine values (Stockfish path, serial port) are overridden in `config/local.yaml` (git-ignored); the
   `STOCKFISH_PATH` environment variable comes first. Neither is shown here.
 
-153 values, 42 of them assumed.
+161 values, 49 of them assumed.
 
 ## geometry
 
@@ -32,9 +32,9 @@ written next to it in the file.
 
 | Key | Value | Unit | Assumed | Firmware constant | Description |
 |---|---|---|---|---|---|
-| `drive.full_steps_per_rev` | `200` |  |  |  | NEMA 17 style 1.8 degree stepper: the "200" in 200 * f * i |
-| `drive.microstepping` | `16` |  |  |  | f: TB6600 microstepping (SW1 OFF, SW2 OFF, SW3 ON) |
-| `drive.gear_ratio` | `1.0` |  |  |  | i: gear ratio motor to driving link; confirmed 1:1 direct drive |
+| `drive.full_steps_per_rev` | `200` |  |  | `kFullStepsPerRev` | NEMA 17 style 1.8 degree stepper: the "200" in 200 * f * i |
+| `drive.microstepping` | `16` |  |  | `kMicrostepping` | f: TB6600 microstepping (SW1 OFF, SW2 OFF, SW3 ON) |
+| `drive.gear_ratio` | `1.0` |  |  | `kGearRatio` | i: gear ratio motor to driving link; confirmed 1:1 direct drive |
 
 ## pins
 
@@ -65,8 +65,10 @@ written next to it in the file.
 | `electrical.tb6600.microstep_dip.sw3_on` | `true` |  |  |  | microstep DIP SW3 (16 microsteps: SW3 ON) |
 | `electrical.tb6600.ena_level_driver_enabled` | `HIGH` |  |  | `kTb6600EnaLevelEnabled` | ENA GPIO level that leaves the driver enabled (HIGH or floating) |
 | `electrical.tb6600.ena_level_driver_disabled` | `LOW` |  |  | `kTb6600EnaLevelDisabled` | ENA GPIO level that disables the driver (DISABLE pulls the GPIO to it) |
-| `electrical.tb6600.low_active_enables_stepper` | `false` |  |  |  | FastAccelStepper setEnablePin(pin, low_active_enables_stepper) |
+| `electrical.tb6600.low_active_enables_stepper` | `false` |  |  |  | Documents the ENA polarity (false: HIGH = driver enabled). The firmware drives the ENA pins itself and does not call FastAccelStepper setEnablePin() (it would disable the driver at boot), so nothing reads this key yet. |
 | `electrical.tb6600.auto_enable` | `false` |  |  |  | FastAccelStepper setAutoEnable(auto_enable) |
+| `electrical.tb6600.joint1_dir_high_counts_up` | `true` |  | yes | `kJoint1DirHighCountsUp` | joint 1 (alpha): true = DIR GPIO HIGH makes the step count (and the angle) go up; wrong polarity turns the joint the wrong way |
+| `electrical.tb6600.joint2_dir_high_counts_up` | `true` |  | yes | `kJoint2DirHighCountsUp` | joint 2 (beta): true = DIR GPIO HIGH makes the step count (and the angle) go up |
 | `electrical.limit_switches.contact` | `NC` |  |  |  | normally closed contact: COM to 3V3, NC to the signal pin (a broken wire reads as actuated) |
 | `electrical.limit_switches.com_connected_to` | `3V3` |  |  |  | what the COM terminal is wired to |
 | `electrical.limit_switches.external_pulldown_ohm` | `10000` | ohm |  |  | external pull-down resistor on D34 / D35 |
@@ -74,7 +76,7 @@ written next to it in the file.
 | `electrical.limit_switches.actuated_level` | `LOW` |  |  |  | signal level when the switch is actuated or the wire is broken |
 | `electrical.limit_switches.debounce_min_ms` | `5` | ms |  |  | lowest debounce window the SPEC allows |
 | `electrical.limit_switches.debounce_max_ms` | `10` | ms |  |  | highest debounce window the SPEC allows |
-| `electrical.limit_switches.debounce_ms` | `5` | ms | yes | `kDebounceMs` | debounce window the firmware uses (the low end, so debounce does not delay the stop) |
+| `electrical.limit_switches.debounce_ms` | `8` | ms | yes | `kDebounceMs` | debounce window the firmware uses (SPEC 4.3: 5 to 10 ms) |
 | `electrical.ads1115.address` | `72` |  |  | `kAds1115I2cAddress` | I2C address (ADDR pin tied to GND = 0x48) |
 | `electrical.ads1115.addr_pin_tied_to` | `GND` |  |  |  | what the ADDR pin is wired to |
 | `electrical.ads1115.pga_full_scale_v` | `4.096` | V |  |  | PGA full scale (+/- this voltage) |
@@ -92,9 +94,14 @@ written next to it in the file.
 | `electrical.z_axis.driver` | `L298` |  |  |  | Z motor driver |
 | `electrical.z_axis.pwm_frequency_hz` | `10000` | Hz |  | `kZMotorPwmHz` | Z motor PWM frequency (about 10 kHz) |
 | `electrical.z_axis.timeout_factor` | `1.5` |  |  | `kZTimeoutFactor` | per-move Z timeout = this factor x the full-travel time |
-| `electrical.z_axis.full_travel_ms` | `null` | ms | yes | `kZFullTravelMs` | full Z travel time TOP <-> BOTTOM, measured at assembly (SPEC 13); null = not measured yet |
+| `electrical.z_axis.full_travel_ms` | `5000` | ms | yes | `kZFullTravelMs` | full Z travel time TOP <-> BOTTOM, measured at assembly (SPEC 13); null = not measured yet |
 | `electrical.z_axis.pwm_resolution_bits` | `8` | bits | yes | `kZMotorPwmResolutionBits` | PWM resolution of the Z motor LEDC channel |
 | `electrical.z_axis.ledc_channel` | `0` |  | yes | `kZMotorLedcChannel` | LEDC channel of the Z motor PWM (must use a different timer than the servo: channel c uses timer (c / 2) % 4) |
+| `electrical.z_axis.duty_start_percent` | `40` | % | yes | `kZDutyStartPercent` | Z motor duty at the start of a move, in percent of full PWM; the duty ramps from here to duty_peak_percent |
+| `electrical.z_axis.duty_peak_percent` | `70` | % | yes | `kZDutyPeakPercent` | Z motor duty at the end of the ramp, in percent of full PWM |
+| `electrical.z_axis.duty_ramp_ms` | `500` | ms | yes | `kZDutyRampMs` | time the duty takes to ramp from duty_start_percent to duty_peak_percent |
+| `electrical.z_axis.duty_eased_percent` | `40` | % | yes | `kZDutyEasedPercent` | Z motor duty near the end of the travel (eased, so the carriage meets the limit switch gently), in percent |
+| `electrical.z_axis.ease_after_travel_percent` | `80` | % | yes | `kZEaseAfterTravelPercent` | the duty drops to duty_eased_percent once a move has run this share of full_travel_ms, in percent |
 | `electrical.z_axis.motor_pins_boot_level` | `LOW` |  |  | `kZMotorPinsBootLevel` | level of the three L298 pins (ENA, IN1, IN2) at boot, so Z cannot move before a command (SPEC 10.2); only LOW |
 | `electrical.servo.model` | `SG90` |  |  |  | gripper servo model |
 | `electrical.servo.pwm_frequency_hz` | `50` | Hz |  | `kServoPwmHz` | servo PWM frequency |
@@ -128,31 +135,32 @@ written next to it in the file.
 
 | Key | Value | Unit | Assumed | Firmware constant | Description |
 |---|---|---|---|---|---|
-| `motion.max_speed_deg_s` | `null` | deg/s | yes | `kMaxSpeedDegPerS` | maximum joint speed (SPEC 13); null = not decided |
-| `motion.max_accel_deg_s2` | `null` | deg/s^2 | yes | `kMaxAccelDegPerS2` | maximum joint acceleration (SPEC 13); null = not decided |
-| `motion.direction_change_delay_us` | `null` | us | yes | `kDirectionChangeDelayUs` | delay after a direction change, because the TB6600 DIR opto is slow (SPEC 10.2); null = not decided |
+| `motion.max_speed_deg_s` | `30.0` | deg/s | yes | `kMaxSpeedDegPerS` | maximum joint speed (SPEC 13); a MOVE with a larger F is error:2; null = not decided (every MOVE is then error:2) |
+| `motion.max_accel_deg_s2` | `60.0` | deg/s^2 | yes | `kMaxAccelDegPerS2` | maximum joint acceleration (SPEC 13); an ACCEL with a larger S is error:2; it is also the acceleration used before the first ACCEL; null = not decided (every MOVE and ACCEL is then error:2) |
+| `motion.direction_change_delay_us` | `20` | us | yes | `kDirectionChangeDelayUs` | delay after a direction change, because the TB6600 DIR opto is slow (SPEC 10.2); null = not decided |
 | `motion.step_loss_threshold_deg` | `3.0` | deg | yes | `kStepLossThresholdDeg` | lost-step threshold, "start at 3 degrees" (SPEC 13) |
 | `motion.trajectory_step_mm` | `2.0` | mm |  |  | longest segment of a straight-line trajectory (SPEC 6.3: default 2 mm) |
 | `motion.singularity_margin_deg` | `15.0` | deg |  |  | smallest singularity margin mu allowed at every pick point and trajectory point (SPEC 6.2) |
-| `motion.joint_limits.alpha_min_deg` | `null` | deg | yes | `kJointAlphaMinDeg` | soft limit of joint alpha, low end; null = not known (all four limits are set together or not at all) |
-| `motion.joint_limits.alpha_max_deg` | `null` | deg | yes | `kJointAlphaMaxDeg` | soft limit of joint alpha, high end |
-| `motion.joint_limits.beta_min_deg` | `null` | deg | yes | `kJointBetaMinDeg` | soft limit of joint beta, low end |
-| `motion.joint_limits.beta_max_deg` | `null` | deg | yes | `kJointBetaMaxDeg` | soft limit of joint beta, high end |
+| `motion.joint_limits.alpha_min_deg` | `60.0` | deg | yes | `kJointAlphaMinDeg` | soft limit of joint alpha, low end; null = not known (all four limits are set together or not at all) |
+| `motion.joint_limits.alpha_max_deg` | `200.0` | deg | yes | `kJointAlphaMaxDeg` | soft limit of joint alpha, high end |
+| `motion.joint_limits.beta_min_deg` | `-20.0` | deg | yes | `kJointBetaMinDeg` | soft limit of joint beta, low end |
+| `motion.joint_limits.beta_max_deg` | `115.0` | deg | yes | `kJointBetaMaxDeg` | soft limit of joint beta, high end |
+| `motion.bench_move_without_homing` | `false` |  |  | `kBenchMoveWithoutHoming` | BENCH ONLY. true lets MOVE run without homing (only the homed part of check 4 of SPEC 5.2 is skipped; the Z-at-TOP part applies from stage 4b-2). Use it to turn a joint by hand-sized steps before homing exists. false (the default) is the SPEC behaviour. |
 
 ## firmware
 
 | Key | Value | Unit | Assumed | Firmware constant | Description |
 |---|---|---|---|---|---|
-| `firmware.version` | `4a-0.1.0` |  |  | `kFirmwareVersion` | FW= of the INFO reply: one token, no spaces, no '=' |
+| `firmware.version` | `4b1-s1` |  |  | `kFirmwareVersion` | FW= of the INFO reply: one token, no spaces, no '=' |
 
 ## commander
 
 | Key | Value | Unit | Assumed | Firmware constant | Description |
 |---|---|---|---|---|---|
-| `commander.move_speed_deg_s` | `null` | deg/s | yes |  | F of every MOVE |
-| `commander.acceleration_deg_s2` | `null` | deg/s^2 | yes |  | ACCEL S= sent before each chain; null = no ACCEL is sent |
-| `commander.ping_interval_ms` | `null` | ms | yes |  | PING interval (well below timeouts.heartbeat_timeout_ms) |
-| `commander.grip_settle_ms` | `null` | ms | yes |  | the servo gives no feedback: wait this long after a GRIP |
+| `commander.move_speed_deg_s` | `20.0` | deg/s | yes |  | F of every MOVE |
+| `commander.acceleration_deg_s2` | `40.0` | deg/s^2 | yes |  | ACCEL S= sent before each chain; null = no ACCEL is sent |
+| `commander.ping_interval_ms` | `500` | ms | yes |  | PING interval (well below timeouts.heartbeat_timeout_ms) |
+| `commander.grip_settle_ms` | `400` | ms | yes |  | the servo gives no feedback: wait this long after a GRIP |
 | `commander.start_tolerance_deg` | `null` | deg | yes |  | how far the arm may be from the first point of a chain (the AS5600 is about +/- 1 degree) |
 | `commander.reply_timeout_ms` | `null` | ms | yes |  | how long an ok may take |
 | `commander.done_timeout_ms` | `null` | ms | yes |  | how long a done may take (HOME, ZUP, ZDOWN, WAIT): above the Z timeout |
@@ -265,6 +273,13 @@ Every key below exists in settings.yaml (a test enforces it) and is not yet conf
 - `electrical.limit_switches.debounce_ms`
 - `electrical.servo.ledc_channel`
 - `electrical.servo.pwm_resolution_bits`
+- `electrical.tb6600.joint1_dir_high_counts_up`
+- `electrical.tb6600.joint2_dir_high_counts_up`
+- `electrical.z_axis.duty_eased_percent`
+- `electrical.z_axis.duty_peak_percent`
+- `electrical.z_axis.duty_ramp_ms`
+- `electrical.z_axis.duty_start_percent`
+- `electrical.z_axis.ease_after_travel_percent`
 - `electrical.z_axis.full_travel_ms`
 - `electrical.z_axis.ledc_channel`
 - `electrical.z_axis.pwm_resolution_bits`

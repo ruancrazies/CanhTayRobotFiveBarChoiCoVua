@@ -9,7 +9,14 @@ using protocol::AlarmCode;
 using protocol::Cmd;
 using protocol::ErrorCode;
 
-CommandProcessor::CommandProcessor(ResponseSink* sink, HardwareOps* hardware) : sink_(sink), hardware_(hardware) {}
+CommandProcessor::CommandProcessor(ResponseSink* sink, HardwareOps* hardware, const MotionConfig& motion)
+    : sink_(sink),
+      hardware_(hardware),
+      motion_(motion),
+      accel_deg_s2_(motion.max_accel_deg_s2),
+      commanded_deg_{0, 0},
+      move_running_(false),
+      waits_pending_(0) {}
 
 void CommandProcessor::send_line(bool formatted, const char* line) {
   if (formatted) {
@@ -25,6 +32,11 @@ void CommandProcessor::send_ok() {
 void CommandProcessor::send_error(ErrorCode code) {
   char line[config::kMaxResponseBytes + 1];
   send_line(format_error(line, sizeof(line), code), line);
+}
+
+void CommandProcessor::send_done() {
+  char line[config::kMaxResponseBytes + 1];
+  send_line(format_done(line, sizeof(line)), line);
 }
 
 void CommandProcessor::send_alarm(AlarmCode code) {
@@ -49,6 +61,9 @@ void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
       break;
   }
 
+  if (!in_range(command)) {
+    return;
+  }
   // The ESTOP set is declared once, in protocol.h (CB_ESTOP_ACCEPTED, SPEC 5.1): ENABLE is not in it.
   if (state_.estop() && !protocol::accepted_in_estop(command.id)) {
     send_error(ErrorCode::kIN_ESTOP);
@@ -77,16 +92,24 @@ void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
     case Cmd::kRESET:
       do_reset();
       return;
-    // Not implemented in stage 4a: parsed above, answered error:1 until their stage.
-    case Cmd::kHOME:
     case Cmd::kMOVE:
+      do_move(command);
+      return;
+    case Cmd::kACCEL:
+      do_accel(command);
+      return;
+    case Cmd::kWAIT:
+      do_wait();
+      return;
+    case Cmd::kPOS:
+      do_pos();
+      return;
+    // Not implemented yet: parsed above, answered error:1 until their stage (HOME and GRIP later, Z in S2).
+    case Cmd::kHOME:
     case Cmd::kZUP:
     case Cmd::kZDOWN:
     case Cmd::kZSTOP:
-    case Cmd::kACCEL:
     case Cmd::kGRIP:
-    case Cmd::kWAIT:
-    case Cmd::kPOS:
     case Cmd::kCount:
       send_error(ErrorCode::kUNRECOGNIZED);
       return;
@@ -94,9 +117,26 @@ void CommandProcessor::handle_line(const char* line, uint32_t now_ms) {
 }
 
 void CommandProcessor::clear_motion_queue() {
-  // Stage 4b: a WAIT that is pending is cancelled here, with no done (SPEC 5.1, "Cancelled done"). There is no
-  // WAIT in 4a, so the queue is all there is to clear.
+  // A WAIT that is pending is cancelled here, with no done (SPEC 5.1, "Cancelled done"); the running MOVE is discarded
+  // with the rest of the queue (the caller has already stopped the pulses).
   queue_.clear();
+  move_running_ = false;
+  waits_pending_ = 0;
+}
+
+// Check 2 beyond the parser (SPEC 5.2): values that are well-formed but outside what the robot allows.
+bool CommandProcessor::in_range(const Command& command) {
+  bool fine = true;
+  if (command.id == Cmd::kMOVE) {
+    fine = motion_.within_limits(command.value("A"), command.value("B")) && motion_.speed_allowed(command.value("F")) &&
+           motion_.accel_allowed(accel_deg_s2_);  // an undecided acceleration ceiling (null) refuses every MOVE
+  } else if (command.id == Cmd::kACCEL) {
+    fine = motion_.accel_allowed(command.value("S"));
+  }
+  if (!fine) {
+    send_error(ErrorCode::kBAD_PARAMETER);
+  }
+  return fine;
 }
 
 // Checks 4 to 6 of the order in command_processor.h, in that order. Only MOVE and HOME have gates; every other
@@ -108,7 +148,7 @@ bool CommandProcessor::passes_gates(const Command& command) {
     return false;
   }
   if (command.id == Cmd::kMOVE) {
-    if (!state_.homed()) {
+    if (!state_.homed() && !motion_.bench_move_without_homing) {
       send_error(ErrorCode::kNOT_HOMED);
       return false;
     }
@@ -126,6 +166,105 @@ void CommandProcessor::do_info() {
     sink_->write_line(line);
     send_ok();
   }
+}
+
+void CommandProcessor::do_move(const Command& command) {
+  if (try_enqueue(command)) {
+    send_ok();
+  }
+}
+
+void CommandProcessor::do_accel(const Command& command) {
+  accel_deg_s2_ = command.value("S");
+  send_ok();
+}
+
+// ok now, done when the queue has drained (immediately when it is empty). The done is lost when the queue is cleared
+// first: clear_motion_queue() forgets the WAITs.
+void CommandProcessor::do_wait() {
+  send_ok();
+  if (queue_.empty()) {
+    send_done();
+  } else {
+    ++waits_pending_;
+  }
+}
+
+// The angles are where the pulses issued so far have taken each joint; once a joint has arrived they are exactly the
+// angles that were asked for (not rounded to a whole step). The sensor angles do not exist yet (stage 4b-4): 0.
+void CommandProcessor::do_pos() {
+  int32_t steps[kJointCount];
+  for (uint8_t joint = 0; joint < kJointCount; ++joint) {
+    steps[joint] = hardware_->joint_steps_issued(joint);
+  }
+  PosReport report;
+  report.a_deg = joint_angle_deg(kJointAlpha, steps[kJointAlpha]);
+  report.b_deg = joint_angle_deg(kJointBeta, steps[kJointBeta]);
+  report.sensor_a_deg = 0;
+  report.sensor_b_deg = 0;
+  report.steps_a = steps[kJointAlpha];
+  report.steps_b = steps[kJointBeta];
+  report.z_state = protocol::name_of(protocol::ZState::kMID);  // no limit switch is read before stage 4b-2
+  char line[config::kMaxResponseBytes + 1];
+  if (format_pos(line, sizeof(line), report)) {
+    sink_->write_line(line);
+    send_ok();
+  }
+}
+
+double CommandProcessor::joint_angle_deg(uint8_t joint, int32_t steps) const {
+  return steps == angle_to_steps(motion_, commanded_deg_[joint]) ? commanded_deg_[joint] : steps_to_angle(motion_, steps);
+}
+
+void CommandProcessor::poll_motion() {
+  for (;;) {
+    if (move_running_) {
+      if (hardware_->joints_running()) {
+        return;
+      }
+      Command finished;
+      queue_.pop(&finished);
+      move_running_ = false;
+    }
+    if (queue_.empty()) {
+      break;
+    }
+    if (start_next_move()) {
+      return;
+    }
+  }
+  while (waits_pending_ > 0) {  // the queue has drained: every pending WAIT gets its done
+    --waits_pending_;
+    send_done();
+  }
+}
+
+bool CommandProcessor::start_next_move() {
+  Command command;
+  double accel_deg_s2 = 0;
+  if (!queue_.peek(&command, &accel_deg_s2)) {
+    return false;
+  }
+  int32_t current[kJointCount];
+  for (uint8_t joint = 0; joint < kJointCount; ++joint) {
+    current[joint] = hardware_->joint_steps_issued(joint);
+  }
+  const double alpha_deg = command.value("A");
+  const double beta_deg = command.value("B");
+  const JointMove move = plan_joint_move(motion_, current, alpha_deg, beta_deg, command.value("F"), accel_deg_s2);
+  commanded_deg_[kJointAlpha] = alpha_deg;
+  commanded_deg_[kJointBeta] = beta_deg;
+  if (!move.any()) {  // already there: nothing to run
+    Command dropped;
+    queue_.pop(&dropped);
+    return false;
+  }
+  if (!hardware_->start_joint_move(move)) {
+    do_estop();  // the joints could not be started: fail safe (stop, clear the queue, latch ESTOP, !alarm:ESTOP)
+    return true;
+  }
+  move_running_ = true;
+  return true;
 }
 
 void CommandProcessor::do_ping(uint32_t now_ms) {
@@ -157,6 +296,7 @@ void CommandProcessor::do_estop() {
 }
 
 void CommandProcessor::do_reset() {
+  hardware_->stop_joint_pulses();  // a running MOVE does not survive a RESET (SPEC 5.1, "Cancelled done")
   clear_motion_queue();
   state_.reset();
   send_ok();
@@ -173,7 +313,7 @@ void CommandProcessor::tick(uint32_t now_ms) {
 }
 
 bool CommandProcessor::try_enqueue(const Command& command) {
-  if (!queue_.push(command)) {
+  if (!queue_.push(command, accel_deg_s2_)) {
     send_error(ErrorCode::kQUEUE_FULL);
     return false;
   }

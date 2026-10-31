@@ -1,5 +1,6 @@
 #include "response_format.h"
 
+#include <stdio.h>
 #include <string.h>
 
 namespace chessbot {
@@ -47,12 +48,40 @@ LineBuilder& LineBuilder::add_int(long value) {
   return add(digits + i);
 }
 
+LineBuilder& LineBuilder::add_float(double value) {
+  char text[40];  // room for 15 digits, a sign, the dot and the decimals
+  const int written = snprintf(text, sizeof(text), "%.*f", protocol::kFloatDecimals, value);
+  if (written < 0 || static_cast<size_t>(written) >= sizeof(text)) {
+    ok_ = false;
+    buffer_[0] = '\0';
+    return *this;
+  }
+  size_t length = static_cast<size_t>(written);
+  if (memchr(text, '.', length) != nullptr) {  // drop the trailing zeros, then a bare dot (the Python rstrip("0").rstrip("."))
+    while (length > 0 && text[length - 1] == '0') {
+      --length;
+    }
+    if (length > 0 && text[length - 1] == '.') {
+      --length;
+    }
+  }
+  text[length] = '\0';
+  if (strcmp(text, "-0") == 0 || length == 0) {
+    return add("0");
+  }
+  return add(text);
+}
+
 LineBuilder& LineBuilder::add_text_field(const char* key, const char* value) {
   return add_char(' ').add(key).add_char('=').add(value);
 }
 
 LineBuilder& LineBuilder::add_int_field(const char* key, long value) {
   return add_char(' ').add(key).add_char('=').add_int(value);
+}
+
+LineBuilder& LineBuilder::add_float_field(const char* key, double value) {
+  return add_char(' ').add(key).add_char('=').add_float(value);
 }
 
 bool format_ok(char* buffer, size_t capacity) {
@@ -91,6 +120,36 @@ bool format_info(char* buffer, size_t capacity, const char* firmware_version) {
       line.add_int_field(field.name, protocol::kProtocolVersion);
     } else {
       return false;  // INFO declares no other kind
+    }
+  }
+  return line.ok();
+}
+
+bool format_pos(char* buffer, size_t capacity, const PosReport& report) {
+  LineBuilder line(buffer, capacity);
+  line.add(protocol::name_of(protocol::Cmd::kPOS));
+  // The fields come from the declared POS data line (protocol.h), in order; each is looked up by its name.
+  for (uint8_t i = 0; i < protocol::kDataFieldCount; ++i) {
+    const protocol::DataFieldSpec& field = protocol::kDataFields[i];
+    if (field.line != protocol::DataLine::kPOS) {
+      continue;
+    }
+    if (strcmp(field.name, "A") == 0) {
+      line.add_float_field(field.name, report.a_deg);
+    } else if (strcmp(field.name, "B") == 0) {
+      line.add_float_field(field.name, report.b_deg);
+    } else if (strcmp(field.name, "SA") == 0) {
+      line.add_float_field(field.name, report.sensor_a_deg);
+    } else if (strcmp(field.name, "SB") == 0) {
+      line.add_float_field(field.name, report.sensor_b_deg);
+    } else if (strcmp(field.name, "NA") == 0) {
+      line.add_int_field(field.name, report.steps_a);
+    } else if (strcmp(field.name, "NB") == 0) {
+      line.add_int_field(field.name, report.steps_b);
+    } else if (strcmp(field.name, "Z") == 0) {
+      line.add_text_field(field.name, report.z_state);
+    } else {
+      return false;  // a POS field the formatter does not know: the declaration and this function disagree
     }
   }
   return line.ok();

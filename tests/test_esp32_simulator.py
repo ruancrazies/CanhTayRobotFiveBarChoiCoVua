@@ -38,8 +38,11 @@ def test_unset_values_come_from_settings_yaml_and_null_ones_are_refused() -> Non
     assert partial.queue_capacity == settings.serial.queue_depth
     assert partial.heartbeat_timeout_s == to_seconds(settings.timeouts.heartbeat_timeout_ms)
     # Values that are null there (not decided yet) have no default: asking for them is an error.
-    for missing in ("z_travel_s", "home_joints_s", "initial_joint_deg"):
-        kwargs = dict(z_travel_s=1.0, home_joints_s=0.1, initial_joint_deg=(0.0, 0.0))
+    assert SimConfig.from_settings(home_joints_s=0.1, initial_joint_deg=(0.0, 0.0)).z_travel_s == to_seconds(
+        settings.electrical.z_axis.full_travel_ms
+    )  # stage 4b-1 gave the Z travel time an assumed value
+    for missing in ("home_joints_s", "initial_joint_deg"):
+        kwargs = dict(home_joints_s=0.1, initial_joint_deg=(0.0, 0.0))
         del kwargs[missing]
         with pytest.raises(ConfigError, match="settings.yaml"):
             SimConfig.from_settings(**kwargs)

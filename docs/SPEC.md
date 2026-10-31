@@ -118,7 +118,7 @@ chess-robot/
 
 ### 4.3 Electrical conventions
 
-- **TB6600:** common-anode wiring. The three (+) inputs go to 3V3 and the three (−) inputs go to GPIOs; a LOW GPIO makes the opto conduct. **Active ENA means driver OFF:** GPIO HIGH or floating = driver enabled; GPIO LOW = driver disabled. Therefore `setEnablePin(pin, false)`, `setAutoEnable(false)`, and DISABLE pulls the GPIO LOW. Configure these pins at the very start of setup().
+- **TB6600:** common-anode wiring. The three (+) inputs go to 3V3 and the three (−) inputs go to GPIOs; a LOW GPIO makes the opto conduct. **Active ENA means driver OFF:** GPIO HIGH or floating = driver enabled; GPIO LOW = driver disabled. Therefore the firmware drives the ENA pins itself (HIGH to enable, LOW to disable) and calls `setAutoEnable(false)` on both steppers; it does **not** call FastAccelStepper's `setEnablePin()`, which (0.33.14) drives the pin to the disabled level at the moment it is called and would release both joints at boot. Configure these pins at the very start of setup().
 - **Limit switches (NC):** COM to 3V3, NC to the signal pin, 10 kΩ pull-down. Normally HIGH; actuated or wire broken = LOW (fail-safe). Debounce 5–10 ms in firmware.
 - **AS5600 (analog, full range 0–100% of Vdd, default OUTS = 00, not programmed):** ADS1115 A0 = AS5600 #2 (β), A1 = AS5600 #1 (α), A2 = Vdd, PGA ±4.096 V. Compute `r = V_OUT / V_A2` and sensor angle `θ = k·r·360° + b`. k and b are per sensor and stored in data/calibration/encoder_calibration.json. If `r < 0.02` or `r > 0.98`, raise `!alarm:SENSOR_FAULT`. System error is about ±1°, so use it only for lost-step detection and homing.
 - **Z axis:** DC motor through L298, IN1 = raise, IN2 = lower. Only two positions: TOP (limit #1, homing reference) and BOTTOM (limit #2). A limit switch stops the motor inside the interrupt. Timeout per move is about 1.5 × the full-travel time.
@@ -133,15 +133,15 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 | Command | Function | Response |
 | --- | --- | --- |
 | HOME [Z] [AB] | Homing. No argument: Z first (raise until limit #1), then the two joints using AS5600. When it moves the joints (no argument, or `AB`) it needs the drivers enabled; `HOME Z` does not. HOME never enables the drivers: the PC sends ENABLE first | ok, then done; error:6 if it moves the joints while the drivers are disabled |
-| MOVE A=<α> B=<β> F=<speed> | Move both joints to target angles. No Z parameter | ok when queued; error:2 if out of limits; error:6 if the drivers are disabled; error:4 if not homed or Z not at TOP; error:3 if the queue is full |
+| MOVE A=<α> B=<β> F=<speed> | Move both joints to target angles at F (deg/s, the speed of the faster joint; both joints finish together) with the acceleration of the last ACCEL. No Z parameter | ok when queued; error:2 if α or β is outside `motion.joint_limits` or F is above `motion.max_speed_deg_s`; error:6 if the drivers are disabled; error:4 if not homed or Z not at TOP; error:3 if the queue is full |
 | ZUP | Raise Z until limit #1 triggers | ok, then done |
 | ZDOWN | Lower Z until limit #2 triggers | ok, then done |
 | ZSTOP | Stop and brake Z immediately | ok |
-| ACCEL S=<deg/s²> | Acceleration for following segments | ok |
+| ACCEL S=<deg/s²> | Acceleration for following MOVEs (before any ACCEL it is `motion.max_accel_deg_s2`) | ok; error:2 if above `motion.max_accel_deg_s2` |
 | GRIP S=<0–180> | Gripper servo angle | ok |
 | ENABLE / DISABLE | Enable / disable both TB6600 drivers. DISABLE also clears the homed flag: homing is mandatory afterwards, and ENABLE does not restore it. DISABLE also stops the joint pulses and clears the whole motion queue (see "DISABLE rules" below) | ok |
 | WAIT | Wait for the motion queue to drain | ok, then done; the done is cancelled if the queue is cleared first (see "Cancelled done" below) |
-| POS | Commanded angles, AS5600 angles, steps issued, Z state (TOP / BOTTOM / MID) | one line, then ok |
+| POS | Commanded angles (A, B: the target of the last MOVE started, or the angle the steps issued so far correspond to when the joint has not arrived), AS5600 angles (SA, SB: 0 until the AS5600 stage), steps issued (NA, NB: counted from power-up, step 0 = angle 0 until HOME exists), Z state (TOP / BOTTOM / MID; MID until the limit-switch stage) | one line, then ok |
 | INFO | Firmware and protocol version | one line, then ok |
 | PING | Heartbeat from the PC | ok |
 | ESTOP | Stop joint pulses (drivers stay enabled), stop and brake Z, set ESTOP flag. Accepted again while already in ESTOP: harmless, and it answers the alarm again | !alarm:ESTOP |
@@ -162,7 +162,7 @@ Line-based text, G-code style, each command ends with a newline. Format: `NAME K
 - `!alarm:ESTOP` is also the answer to an ESTOP command received while already in ESTOP.
 - **Order of checks.** One fixed order for every received line; the first check that fails decides the reply and nothing after it runs. The firmware core, the PC simulator and the wire-compat model all follow it (declared as `CHECK_ORDER` in `config/protocol_commands.py` and `CB_CHECK_ORDER` in `firmware/include/protocol.h`):
   1. unrecognized command name: `error:1`;
-  2. missing, malformed or out-of-range parameter (including joint limits where they are known): `error:2`;
+  2. missing, malformed or out-of-range parameter: `error:2`. Out of range means outside the joint soft limits (`motion.joint_limits`) for MOVE, above `motion.max_speed_deg_s` for F, above `motion.max_accel_deg_s2` for ACCEL S. This check also runs in an ESTOP, before check 3, and a ceiling that is `null` in settings.yaml refuses every MOVE;
   3. the ESTOP flag is set and the command is not accepted in an ESTOP: `error:5`;
   4. the command needs the joint drivers and they are disabled: `error:6`. This applies to MOVE and to HOME with no argument or with `AB`; `HOME Z` and every other command skip this check;
   5. the command needs a homed arm: `error:4`. This applies to MOVE (not homed, or Z not at TOP); HOME `AB` without Z at TOP is also `error:4`;
@@ -346,12 +346,14 @@ PlatformIO, C++, FreeRTOS with several tasks, FastAccelStepper library.
 ### 10.2 Mandatory requirements
 
 - **Boot:** at the very start of setup(), drive the two TB6600 ENA pins HIGH (driver enabled, so the joints hold position; floating pins also enable the drivers) and drive the Z motor pins (L298 ENA, IN1, IN2) LOW so Z is off. Emit no pulses before a command arrives.
-- **FastAccelStepper:** `setEnablePin(pin, false)` and `setAutoEnable(false)`; enable/disable only through ENABLE / DISABLE. Check function names against the library version in use. The DIR opto is slow, so set a direction-change delay as the TB6600 requires.
+- **FastAccelStepper (pinned to 0.33.14 in platformio.ini):** `setAutoEnable(false)` on both joints, and the ENA pins are never given to the library (no `setEnablePin()`: see section 4.3); the firmware drives them, and only ENABLE / DISABLE (and the boot levels) change them. ESTOP, DISABLE and RESET stop the pulses with `forceStop()` (no deceleration ramp in stage 4b-1). The DIR opto is slow, so the direction-change delay of `motion.direction_change_delay_us` is passed to `setDirectionPin()`.
 - **PWM:** LEDC for the Z motor (about 10 kHz) and the servo (50 Hz) use separate channels and timers that do not collide.
 - **Z axis:** ZUP runs until limit #1 triggers; ZDOWN runs until limit #2 triggers. A limit switch stops the motor inside the interrupt (PWM = 0, brake). Moderate PWM, ramped up, eased near the end of travel. On timeout stop and send `!alarm:Z_TIMEOUT`. `LIMIT_Z` when both switches are active, or when Z is at TOP and the top switch releases without a command.
 - **Heartbeat:** if PING is missing beyond the threshold, decelerate both joints in a controlled way, stop and brake Z, **keep drivers enabled** (releasing the motors can collapse the arm and drop Z), wait for the PC to reconnect and re-home.
 - **ESTOP:** stop joint pulses (short deceleration if moving fast; stop at once if triggered by a hardware button or LIMIT_Z), stop and brake Z, keep drivers enabled, set the ESTOP flag. DISABLE only when the user commands a shutdown or a driver reports over-temperature or over-current. While the flag is set only POS, INFO, PING, ZSTOP, ESTOP, RESET and DISABLE are accepted; every other command, including ENABLE, is `error:5`, and ENABLE works again after RESET. A repeated ESTOP while already in ESTOP is accepted and harmless.
 - **Homing:** Z first (raise slowly until limit #1), then both joints using the AS5600 angle. Every MOVE is rejected with error:4 until homed (after the error:6 check of section 5.2). HOME needs the drivers enabled when it moves the joints and never enables them itself. DISABLE clears the homed flag, so homing is mandatory after it as well; during a running HOME it aborts the joint part without a done, and it clears the whole motion queue (sections 5.1 and 5.2).
+- **Bench setting.** `motion.bench_move_without_homing` (default `false`, BENCH ONLY) skips the homed part of check 4 so that a MOVE can be tried on the bench before HOME exists. It changes nothing else: the checks 1, 2, 5, 6 and 3 and the Z-at-TOP part of check 4 still apply. The firmware, the simulator and the wire-compat bench scripts all honour it. Leave it `false` for any real use.
+- **Joint motion (stage 4b-1).** MOVE converts each angle to whole steps (`200 × microstepping × gear ratio / 360` per degree, from settings), both joints start together and run for the same time (the speed F is that of the joint with the larger travel; the other is scaled down), with the acceleration of ACCEL. Steps are absolute, counted from power-up. A full queue is `error:3`; a MOVE the board cannot start is an ESTOP. The running MOVE counts as one entry of the queue until it has finished. The heartbeat rule of this section is enforced from stage 4b-5; until then a missing PING stops nothing.
 - **External pull-downs on D34 / D35,** and 5–10 ms debounce in firmware.
 
 ### 10.3 Configuration of the firmware

@@ -218,9 +218,34 @@ def test_removing_a_key_from_assumed_confirms_it(settings_yaml_data: dict[str, A
 
 
 def test_a_null_value_means_not_decided(cfg: Settings) -> None:
-    assert cfg.motion.max_speed_deg_s is None
-    assert cfg.electrical.z_axis.full_travel_ms is None
+    # Still null after stage 4b-1: the Commander timeouts nobody has chosen, the per-machine port, the simulator times.
+    assert cfg.commander.start_tolerance_deg is None
+    assert cfg.commander.done_timeout_ms is None
     assert cfg.serial.port is None
+    assert cfg.simulator.home_joints_ms is None
+
+
+def test_stage_4b1_assumed_values_are_set_and_stay_assumed(cfg: Settings) -> None:
+    # The values the owner chose for the bench (conservative; none is measured yet), all listed in `assumed`.
+    assert (cfg.motion.max_speed_deg_s, cfg.motion.max_accel_deg_s2, cfg.motion.direction_change_delay_us) == (30.0, 60.0, 20)
+    limits = cfg.motion.joint_limits
+    assert (limits.alpha_min_deg, limits.alpha_max_deg, limits.beta_min_deg, limits.beta_max_deg) == (60.0, 200.0, -20.0, 115.0)
+    z = cfg.electrical.z_axis
+    assert (z.full_travel_ms, z.timeout_factor, z.pwm_frequency_hz) == (5000, 1.5, 10000)
+    assert (z.duty_start_percent, z.duty_peak_percent, z.duty_ramp_ms) == (40, 70, 500)
+    assert (z.duty_eased_percent, z.ease_after_travel_percent) == (40, 80)
+    assert cfg.electrical.limit_switches.debounce_ms == 8
+    assert (cfg.commander.move_speed_deg_s, cfg.commander.acceleration_deg_s2) == (20.0, 40.0)
+    assert (cfg.commander.ping_interval_ms, cfg.commander.grip_settle_ms) == (500, 400)
+    assert cfg.timeouts.heartbeat_timeout_ms == 2000 and cfg.serial.queue_depth == 8
+    assert cfg.motion.bench_move_without_homing is False  # bench only: off unless the owner turns it on
+    for key in (
+        "motion.max_speed_deg_s", "motion.max_accel_deg_s2", "motion.direction_change_delay_us",
+        "motion.joint_limits.alpha_min_deg", "motion.joint_limits.beta_max_deg", "electrical.z_axis.full_travel_ms",
+        "electrical.z_axis.duty_peak_percent", "electrical.limit_switches.debounce_ms", "commander.move_speed_deg_s",
+        "commander.ping_interval_ms", "electrical.tb6600.joint1_dir_high_counts_up",
+    ):
+        assert cfg.is_assumed(key), key
 
 
 def test_milliseconds_convert_to_seconds_without_changing_the_value(cfg: Settings) -> None:

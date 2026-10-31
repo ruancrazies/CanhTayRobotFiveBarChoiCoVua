@@ -47,6 +47,7 @@ _ESP32_LEDC_TIMERS = 4
 _ADS1115_ADDRESSES = frozenset({0x48, 0x49, 0x4A, 0x4B})
 _ADS1115_CHANNELS = frozenset({0, 1, 2, 3})
 _LEVELS = frozenset({"HIGH", "LOW"})
+_PERCENT_MAX = 100
 _UINT8_MAX = 255  # the firmware stores these in uint8_t / uint16_t / uint32_t constants
 _UINT16_MAX = 65535
 _UINT32_MAX = 4294967295
@@ -270,6 +271,8 @@ class Tb6600Config:
     ena_level_driver_disabled: str
     low_active_enables_stepper: bool
     auto_enable: bool
+    joint1_dir_high_counts_up: bool
+    joint2_dir_high_counts_up: bool
 
     def __post_init__(self) -> None:
         if self.wiring != "common_anode":
@@ -369,10 +372,21 @@ class ZAxisConfig:
     full_travel_ms: Optional[int]
     pwm_resolution_bits: int
     ledc_channel: int
+    duty_start_percent: int
+    duty_peak_percent: int
+    duty_ramp_ms: int
+    duty_eased_percent: int
+    ease_after_travel_percent: int
     motor_pins_boot_level: str
 
     def __post_init__(self) -> None:
         _positive("electrical.z_axis", pwm_frequency_hz=self.pwm_frequency_hz)
+        for name in ("duty_start_percent", "duty_peak_percent", "duty_eased_percent"):
+            _within("electrical.z_axis", name, getattr(self, name), 1, _PERCENT_MAX)
+        if self.duty_start_percent > self.duty_peak_percent:
+            raise ConfigError("electrical.z_axis: duty_start_percent must not exceed duty_peak_percent (the duty ramps UP)")
+        _within("electrical.z_axis", "duty_ramp_ms", self.duty_ramp_ms, 0, _UINT16_MAX)
+        _within("electrical.z_axis", "ease_after_travel_percent", self.ease_after_travel_percent, 1, _PERCENT_MAX)
         _optional_positive("electrical.z_axis", full_travel_ms=self.full_travel_ms)
         if self.full_travel_ms is not None:
             _within("electrical.z_axis", "full_travel_ms", self.full_travel_ms, 1, _UINT32_MAX)
@@ -499,6 +513,7 @@ class MotionConfig:
     trajectory_step_mm: float
     singularity_margin_deg: float
     joint_limits: JointLimitsConfig
+    bench_move_without_homing: bool
 
     def __post_init__(self) -> None:
         _optional_positive(

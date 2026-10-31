@@ -103,8 +103,74 @@ void test_line_builder_stays_failed_after_an_overflow() {
   TEST_ASSERT_EQUAL_STRING("", builder.c_str());
 }
 
+// The same text as format_float() of desktop_app/hardware/protocol.py: at most 3 decimals, no trailing zeros, no "-0".
+std::string float_text(double value) {
+  char buffer[48];
+  LineBuilder builder(buffer, sizeof(buffer));
+  builder.add_float(value);
+  TEST_ASSERT_TRUE(builder.ok());
+  return builder.c_str();
+}
+
+void test_floats_are_written_like_the_python_side() {
+  TEST_ASSERT_EQUAL_STRING("135.4", float_text(135.4).c_str());
+  TEST_ASSERT_EQUAL_STRING("0", float_text(0).c_str());
+  TEST_ASSERT_EQUAL_STRING("100", float_text(100.0).c_str());
+  TEST_ASSERT_EQUAL_STRING("-20.5", float_text(-20.5).c_str());
+  TEST_ASSERT_EQUAL_STRING("0.125", float_text(0.125).c_str());
+  TEST_ASSERT_EQUAL_STRING("22.5", float_text(22.5).c_str());
+  TEST_ASSERT_EQUAL_STRING("45.123", float_text(45.1234).c_str());   // three decimals, rounded
+  TEST_ASSERT_EQUAL_STRING("45.124", float_text(45.1236).c_str());
+}
+
+void test_a_tiny_negative_number_is_written_as_zero_not_minus_zero() {
+  TEST_ASSERT_EQUAL_STRING("0", float_text(-0.0001).c_str());
+  TEST_ASSERT_EQUAL_STRING("0", float_text(-0.0).c_str());
+  TEST_ASSERT_EQUAL_STRING("-0.001", float_text(-0.0006).c_str());
+}
+
+void test_a_float_that_does_not_fit_fails_the_line() {
+  char buffer[4];
+  LineBuilder builder(buffer, sizeof(buffer));
+  builder.add_float(12345.678);
+  TEST_ASSERT_TRUE(!builder.ok());
+  TEST_ASSERT_EQUAL_STRING("", builder.c_str());
+}
+
+void test_the_pos_line_lists_the_declared_fields_in_order() {
+  chessbot::PosReport report;
+  report.a_deg = 135.4;
+  report.b_deg = -4.25;
+  report.sensor_a_deg = 0;
+  report.sensor_b_deg = 0;
+  report.steps_a = 1204;
+  report.steps_b = -38;
+  report.z_state = "MID";
+  char line[chessbot::config::kMaxResponseBytes + 1];
+  TEST_ASSERT_TRUE(chessbot::format_pos(line, sizeof(line), report));
+  TEST_ASSERT_EQUAL_STRING("POS A=135.4 B=-4.25 SA=0 SB=0 NA=1204 NB=-38 Z=MID", line);
+}
+
+void test_the_pos_line_fits_the_response_buffer_with_the_longest_values() {
+  chessbot::PosReport report;
+  report.a_deg = -99999.999;
+  report.b_deg = -99999.999;
+  report.sensor_a_deg = -99999.999;
+  report.sensor_b_deg = -99999.999;
+  report.steps_a = -2147483647L;
+  report.steps_b = -2147483647L;
+  report.z_state = "BOTTOM";
+  char line[chessbot::config::kMaxResponseBytes + 1];
+  TEST_ASSERT_TRUE(chessbot::format_pos(line, sizeof(line), report));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_floats_are_written_like_the_python_side);
+  RUN_TEST(test_a_tiny_negative_number_is_written_as_zero_not_minus_zero);
+  RUN_TEST(test_a_float_that_does_not_fit_fails_the_line);
+  RUN_TEST(test_the_pos_line_lists_the_declared_fields_in_order);
+  RUN_TEST(test_the_pos_line_fits_the_response_buffer_with_the_longest_values);
   RUN_TEST(test_ok_and_done);
   RUN_TEST(test_every_error_code);
   RUN_TEST(test_every_alarm_code);

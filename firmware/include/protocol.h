@@ -84,6 +84,12 @@ constexpr const char* const kAlarmNames[] = {
   X(BOTTOM)            \
   X(MID)
 
+enum class ZState : uint8_t {
+#define CB_Z_ENUM(name) k##name,
+  CB_Z_STATES(CB_Z_ENUM)
+#undef CB_Z_ENUM
+};
+
 constexpr const char* const kZStateNames[] = {
 #define CB_Z_NAME(name) #name,
     CB_Z_STATES(CB_Z_NAME)
@@ -225,6 +231,7 @@ constexpr uint8_t kDataFieldCount = sizeof(kDataFields) / sizeof(kDataFields[0])
 inline const CommandSpec& spec_of(Cmd command) { return kCommands[static_cast<uint8_t>(command)]; }
 inline const char* name_of(Cmd command) { return spec_of(command).name; }
 inline const char* name_of(AlarmCode alarm) { return kAlarmNames[static_cast<uint8_t>(alarm)]; }
+inline const char* name_of(ZState state) { return kZStateNames[static_cast<uint8_t>(state)]; }
 inline uint8_t number_of(ErrorCode code) { return static_cast<uint8_t>(code); }
 
 // True when ``command`` is still accepted while the ESTOP flag is set (the CB_ESTOP_ACCEPTED list).

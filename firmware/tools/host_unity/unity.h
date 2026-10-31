@@ -79,6 +79,19 @@ inline void assert_equal_string(const char* expected, const char* actual, const 
   } while (0)
 #define TEST_ASSERT_EQUAL_UINT8(expected, actual) TEST_ASSERT_EQUAL_INT(expected, actual)
 #define TEST_ASSERT_EQUAL_UINT32(expected, actual) TEST_ASSERT_EQUAL_INT(expected, actual)
+#define TEST_ASSERT_EQUAL_UINT16(expected, actual) TEST_ASSERT_EQUAL_INT(expected, actual)
+#define TEST_ASSERT_EQUAL_INT32(expected, actual) TEST_ASSERT_EQUAL_INT(expected, actual)
+#define TEST_ASSERT_EQUAL(expected, actual) TEST_ASSERT_EQUAL_INT(expected, actual)
+#define TEST_ASSERT_UINT32_WITHIN(delta, expected, actual)                                                        \
+  do {                                                                                                            \
+    const long long e_ = static_cast<long long>(expected), a_ = static_cast<long long>(actual);                   \
+    const long long d_ = e_ > a_ ? e_ - a_ : a_ - e_;                                                             \
+    if (d_ > static_cast<long long>(delta)) {                                                                     \
+      char m_[160];                                                                                               \
+      std::snprintf(m_, sizeof(m_), "Expected %lld Was %lld (within %lld) (" #actual ")", e_, a_, static_cast<long long>(delta)); \
+      host_unity::fail(__FILE__, __LINE__, m_);                                                                   \
+    }                                                                                                             \
+  } while (0)
 #define TEST_ASSERT_EQUAL_STRING(expected, actual) host_unity::assert_equal_string((expected), (actual), __FILE__, __LINE__)
 #define TEST_ASSERT_DOUBLE_WITHIN(delta, expected, actual)                                             \
   do { if (!(std::fabs(static_cast<double>(expected) - static_cast<double>(actual)) <= static_cast<double>(delta))) \
